@@ -2,6 +2,8 @@
 Just a bad Python reinforcement learning Torch implementation.
 Do you know about good code practices? Because I don't.
 
+Requires Python 3.12.x
+
 The lua mods require the game to be launched with --luadebug
 
 Either in the steam launch option or in a windows shortcut, and such.
