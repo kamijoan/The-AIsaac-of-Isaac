@@ -3,6 +3,7 @@ Just a bad Python reinforcement learning Torch implementation.
 Do you know about good code practices? Because I don't.
 
 Requires Python 3.12.x
+And probably CUDA installed and compatible.
 
 The lua mods require the game to be launched with --luadebug
 
