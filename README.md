@@ -18,3 +18,5 @@ The mods (and python) use absolute directories to read and write to files, manua
 
 Thanks to the main contributors to the code, Mr. GPT, D. Seek, and X. Grok.
 It was fun seeing how they are all stupid on their own way, and me still worse.
+
+Also, windows defender will try to scan the files every time they are written, so the safest way to solve that is adding the bunch of .txt files as an exception.
