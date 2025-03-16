@@ -4,7 +4,6 @@ from threading import Thread
 from scipy.ndimage import label
 import numpy as np
 import cv2,torch
-torch.set_printoptions(profile="full")
 
 from isaacPPO import PPOPolicy, PPOAgent
 
