@@ -15,4 +15,4 @@ Do multiple mods work the same speed as a single one with all the functions? who
 The mods (and python) use absolute directories to read and write to files, manually edit them while you read what the code you're trying to randomly execute in your pc does.
 
 Thanks to the main contributors to the code, Mr. GPT, D. Seek, and X. Grok.
-It was fun seeing how they are all stupid on their own way.
+It was fun seeing how they are all stupid on their own way, and me still worse.
