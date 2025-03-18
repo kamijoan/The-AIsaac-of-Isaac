@@ -129,11 +129,6 @@ class PPOAgent:
         print(f"Advantages normalized - Mean: {advantages.mean():.4f}, Std: {advantages.std():.4f}")
         returns = advantages + values
 
-        # Gradient accumulation settings
-        accumulation_steps = 1
-        effective_batch_size = batch_size  # 128
-        mini_batch_size = effective_batch_size // accumulation_steps  # 128 with accumulation_steps=1
-
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
