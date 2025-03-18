@@ -452,7 +452,6 @@ while True:
     readGameData()
     currentFloor = playerData["stage"]
 
-    print(playerData["time_counter"])
     if playerData["time_counter"] > 1 and not reset and not manualTesting:
         with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
             f.write("reset")
