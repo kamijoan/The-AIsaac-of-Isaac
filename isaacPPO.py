@@ -15,13 +15,13 @@ class PPOPolicy(nn.Module):
 
         # Single convolution for room_grid
         if isaacNumber == 1:
-            self.room_conv = nn.Conv2d(4, 8, kernel_size=1)  # 1x1 conv, preserves 16x28
-            room_conv_out_size = 8 * room_shape[1] * room_shape[2]
+            convKernel = 5
         else:
-            self.room_conv = nn.Conv2d(4, 8, kernel_size=3)  # 1x1 conv, preserves 16x28
-            room_conv_out_size = 8 * (room_shape[1]-2) * (room_shape[2]-2)
+            convKernel = 7
+        self.room_conv = nn.Conv2d(4, 8, kernel_size=convKernel)
+        room_conv_out_size = 8 * (room_shape[1]-convKernel+1) * (room_shape[2]-convKernel+1)
 
-        self.map_conv_base = nn.Conv2d(map_shape[0], 16, kernel_size=1)  # 1x1 conv, preserves 13x13
+        self.map_conv_base = nn.Conv2d(map_shape[0], 16, kernel_size=1)
         map_conv_out_size = 16 * map_shape[1] * map_shape[2]  # 16 * 13 * 13 = 2704
 
         self.critical_fc = nn.Linear(8, 16)
@@ -38,6 +38,8 @@ class PPOPolicy(nn.Module):
         #total_features = room_conv_out_size + map_conv_out_size + 32 + 32 + 64
         total_features = room_conv_out_size + 16
         self.fc1 = nn.Linear(total_features, 512)
+        nn.init.xavier_normal_(self.fc1.weight, gain=2.0)  # Boost gain (default is 1.0)
+        nn.init.zeros_(self.fc1.bias)
         self.actor = nn.Linear(512, action_size)
         self.critic = nn.Linear(512, 1)
 
@@ -62,7 +64,9 @@ class PPOPolicy(nn.Module):
 
         #x = torch.cat([x_room, x_map, x_critical, x_items, x_memory], dim=1)
         x = torch.cat([x_room, x_critical], dim=1)
+        x = (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True) + 1e-8)
         x = self.fc1(x)
+        #print(f"fc1 output mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
         value = self.critic(x)
         logits = self.actor(x)
 
@@ -74,7 +78,7 @@ class PPOPolicy(nn.Module):
 
 
 class PPOAgent:
-    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, lr=0.0003, gamma=0.99, clip_param=0.2, value_loss_coef=0.2, entropy_coef=0.01, max_grad_norm=0.5, n_steps=4096):
+    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, lr=0.0003, gamma=0.99, clip_param=0.2, value_loss_coef=0.2, entropy_coef=0.1, max_grad_norm=0.5, n_steps=4096):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = PPOPolicy(room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber).to(self.device)
         self.optimizer = torch.optim.Adam([
