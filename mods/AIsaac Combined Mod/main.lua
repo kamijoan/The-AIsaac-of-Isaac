@@ -9,16 +9,36 @@ local previousEntityData = ""
 local previousRoomData = ""
 local totalDamageDealt = 0
 local enemyHPBefore = {}
+local instanceNumber = 0       -- Current active instance number
+local pendingNumber = 1        -- Pending instance number (not applied yet)
+local pendingChanges = false   -- Whether there are pending changes to apply
 
 -- ====================== FILE PATHS ======================
-local playerDataPath = "F:/IsaacData1.txt"
-local roomTileDataPath = "F:/IsaacTileData1.txt"
-local damageDataPath = "F:/IsaacEnemyDamage1.txt"
-local floorDataPath = "F:/IsaacFloorData1.txt"
-local entityDataFile = "F:/IsaacEntityData1.txt"
-local inputFile = "F:/IsaacInputs1.txt"
-local responseFile = "F:/IsaacResponse1.txt"
+local function GetFilePaths()
+    -- If instance is 0, return dummy paths that won't be used
+    if instanceNumber == 0 then
+        return {
+            playerData = nil,
+            roomTileData = nil,
+            damageData = nil,
+            floorData = nil,
+            entityData = nil,
+            input = nil,
+            response = nil
+        }
+    end
 
+    -- Normal path generation for instances > 0
+    return {
+        playerData = "F:/IsaacData" .. instanceNumber .. ".txt",
+        roomTileData = "F:/IsaacTileData" .. instanceNumber .. ".txt",
+        damageData = "F:/IsaacEnemyDamage" .. instanceNumber .. ".txt",
+        floorData = "F:/IsaacFloorData" .. instanceNumber .. ".txt",
+        entityData = "F:/IsaacEntityData" .. instanceNumber .. ".txt",
+        input = "F:/IsaacInputs" .. instanceNumber .. ".txt",
+        response = "F:/IsaacResponse" .. instanceNumber .. ".txt"
+    }
+end
 -- ====================== SPRITES SETUP ======================
 -- Sprite filenames
 local spriteFiles = {}
@@ -51,18 +71,19 @@ local ignoredTypes = {
 }
 
 -- Flag to enable/disable enemy removal (NoEnemies functionality)
-local removeEnemies = false -- Set to true to enable enemy removal
+local removeEnemies = true -- Set to true to enable enemy removal
 
 -- ====================== HELPER FUNCTIONS ======================
 local function ClearFiles()
     -- Clear/reset all data files
+    local paths = GetFilePaths()
     local files = {
-        playerDataPath,
-        roomTileDataPath,
-        damageDataPath,
-        floorDataPath,
-        entityDataFile,
-        responseFile
+        paths.playerData,
+        paths.roomTileData,
+        paths.damageData,
+        paths.floorData,
+        paths.entityData,
+        paths.response
     }
 
     for _, filepath in ipairs(files) do
@@ -81,6 +102,11 @@ local function ClearFiles()
 end
 
 local function WriteFile(filepath, data)
+    -- Skip file operations if instance is 0 or filepath is nil
+    if instanceNumber == 0 or not filepath then
+        return false
+    end
+
     local file = io.open(filepath, "w")
     if file then
         file:write(data)
@@ -99,7 +125,8 @@ local function resetGame()
 end
 
 local function ReadInputsFromFile()
-    local file = io.open(inputFile, "r")
+    local paths = GetFilePaths()
+    local file = io.open(paths.input, "r")
     if file then
         local data = file:read("*a")
         file:close()
@@ -112,14 +139,14 @@ local function ReadInputsFromFile()
             for action, value in string.gmatch(data, "(%d+) (%d+)") do
                 inputs[tonumber(action)] = tonumber(value)
             end
-            WriteFile(responseFile, data)
+            WriteFile(paths.response, data)
         end
     end
 end
 
 -- ====================== FEATURE: DAMAGE TRACKING ======================
 local function WriteDamageToFile()
-    WriteFile(damageDataPath, tostring(totalDamageDealt))
+    WriteFile(GetFilePaths().damageData, tostring(totalDamageDealt))
 end
 
 -- ====================== FEATURE: ENEMY REMOVAL ======================
@@ -135,6 +162,7 @@ end
 
 -- ====================== FEATURE: ROOM TILE LOGGING ======================
 local function LogRoomTiles()
+    local paths = GetFilePaths()
     local room = game:GetRoom()
     local level = game:GetLevel()
     local gridSize = room:GetGridSize()
@@ -170,11 +198,12 @@ local function LogRoomTiles()
         table.insert(tileData, tileString)
     end
 
-    WriteFile(roomTileDataPath, table.concat(tileData, "\n"))
+    WriteFile(paths.roomTileData, table.concat(tileData, "\n"))
 end
 
 -- ====================== FEATURE: PLAYER DATA LOGGING ======================
 local function WritePlayerData()
+    local paths = GetFilePaths()
     local player = Isaac.GetPlayer(0)
     local level = game:GetLevel()
     local room = game:GetRoom()
@@ -222,11 +251,12 @@ local function WritePlayerData()
         player:GetCard(0), player:GetPill(0),
         aliveEnemies, roomType, firstVisit, stage, timeCounter)
 
-    WriteFile(playerDataPath, data)
+    WriteFile(paths.playerData, data)
 end
 
 -- ====================== FEATURE: FLOOR LAYOUT LOGGING ======================
 local function ScanRooms()
+    local paths = GetFilePaths()
     local level = game:GetLevel()
     local roomData = {}
 
@@ -294,13 +324,14 @@ local function ScanRooms()
 
     -- Write only if data has changed
     if currentRoomData ~= previousRoomData then
-        WriteFile(floorDataPath, currentRoomData)
+        WriteFile(paths.floorData, currentRoomData)
         previousRoomData = currentRoomData
     end
 end
 
 -- ====================== FEATURE: ENTITY SCANNING ======================
 local function ScanEntities()
+    local paths = GetFilePaths()
     local room = game:GetRoom()
     local entities = {}
 
@@ -412,7 +443,7 @@ local function ScanEntities()
     local currentEntityData = table.concat(entities, "|")
 
     if currentEntityData ~= previousEntityData then
-        WriteFile(entityDataFile, currentEntityData)
+        WriteFile(paths.entityData, currentEntityData)
         previousEntityData = currentEntityData
     end
 end
@@ -455,10 +486,36 @@ end)
 
 -- For regular updates (most functions)
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
-    ReadInputsFromFile()
-    RemoveEnemies()
-    ScanEntities()
-    ScanRooms()
+    -- Check for F1 (decrease) and F2 (increase) keys
+    if Input.IsButtonTriggered(Keyboard.KEY_F1, 0) then
+        pendingNumber = math.max(0, pendingNumber - 1)
+        pendingChanges = true  -- Mark that we have pending changes
+    end
+    if Input.IsButtonTriggered(Keyboard.KEY_F2, 0) then
+        pendingNumber = pendingNumber + 1
+        pendingChanges = true  -- Mark that we have pending changes
+    end
+
+    -- Check for F3 (apply changes) - don't allow locking on 0
+    if Input.IsButtonTriggered(Keyboard.KEY_F3, 0) and pendingChanges then
+        if pendingNumber > 0 then
+            instanceNumber = pendingNumber
+            ClearFiles() -- Clear files when changing instance
+        else
+            -- If trying to set to 0, just disable file operations
+            instanceNumber = 0
+            -- No need to clear files since we're disabling
+        end
+        pendingChanges = false -- Reset pending changes flag
+    end
+
+    -- Only read/write files if instance number > 0
+    if instanceNumber > 0 then
+        ReadInputsFromFile()
+        RemoveEnemies()
+        ScanEntities()
+        ScanRooms()
+    end
 end)
 
 -- For rendering input feedback - Updated with dynamic scaling
@@ -507,7 +564,40 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
     -- Log room tiles and player data in post render for consistent timing
     LogRoomTiles()
     WritePlayerData()
+
+    -- Instance number controls UI
+    local font = Font()
+    font:Load("font/terminus.fnt")
+
+    -- Calculate position in bottom-left corner
+    local screenHeight = Isaac.GetScreenHeight()
+    local x = 3  -- Very left edge with small padding
+    local y = screenHeight - 10  -- Very bottom with small padding
+
+
+    -- Display text based on status
+    local displayText
+    if instanceNumber == 0 then
+        -- Show disabled status
+        if pendingChanges then
+            displayText = "Instance: Disabled → " .. pendingNumber .. " (F3 to apply)"
+        else
+            displayText = "Instance: Disabled (F1/F2 to change)"
+        end
+    else
+        -- Normal instance display
+        if pendingChanges then
+            displayText = "Instance: " .. instanceNumber .. " - " .. pendingNumber .. " (F3 to apply)"
+        else
+            displayText = "Instance: " .. instanceNumber
+        end
+    end
+
+    -- Render the text
+    Isaac.RenderScaledText(displayText, x, y, 1, 1, 1, 1, 1, 1)
+
 end)
+
 
 -- For input handling
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, _, buttonAction)
