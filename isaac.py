@@ -4,6 +4,7 @@ from threading import Thread
 from scipy.ndimage import label
 import numpy as np
 import cv2,torch
+torch.set_printoptions(profile="full")
 
 from isaacPPO import PPOPolicy, PPOAgent
 
@@ -398,8 +399,8 @@ numEntityValues = 11
 num_additional_values = len(keyboardKeys)+len(playerNormalization)+len(itemArray)+(lenEntitiesMemory*numEntityValues)
 action_size = 4
 
-clipParam = 0.25*isaacNumber
-value_loss_coef = 0.25*isaacNumber
+clipParam = 0.2*isaacNumber
+value_loss_coef = 0.2*isaacNumber
 agent = PPOAgent(room_shape=(13, 16, 28),map_shape=(6, 13, 13),clip_param=clipParam,value_loss_coef=value_loss_coef,action_size=action_size,n_critical=len(keyboardKeys) + len(playerNormalization),n_items=len(itemArray),n_entity_memory=(lenEntitiesMemory * numEntityValues), isaacNumber=isaacNumber)
 
 emptyFloorTensor = torch.empty((1,6,13,13), dtype=torch.float32, device="cuda")
@@ -451,6 +452,7 @@ while True:
     readGameData()
     currentFloor = playerData["stage"]
 
+    print(playerData["time_counter"])
     if playerData["time_counter"] > 1 and not reset and not manualTesting:
         with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
             f.write("reset")
@@ -573,7 +575,6 @@ while True:
                 entitiesListFull = np.zeros((lenEntitiesMemory, numEntityValues), dtype=np.float32)
 
             entitiesGrids = entityHeatmaps(entitiesList)
-
             if len(current_rooms) != 0 and any(room_number == room/200 for _, _, room_number in current_rooms):
                 minRoom_x = min(x for x, y, _ in current_rooms)
                 minRoom_y = min(y for x, y, _ in current_rooms)
@@ -616,32 +617,32 @@ while True:
             itemsSum = len(playerData["items"])
             pickups = playerData["bombs"] + playerData["coins"] + playerData["keys"]
 
-            reward = (itemsSum - previousItemsSum)*100 + ((totalHP - previousHP)*40) + (damageDifference)
+            reward = (itemsSum - previousItemsSum)/10# + ((totalHP - previousHP)) + (damageDifference/10)
 
             if pickups > previousPickups:
-                reward += 10 * pickups
+                reward += .1 * pickups
 
-            if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
+            """if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
                 punishX += 1
                 if punishX > 2:
-                    reward -= 1
+                    reward -= .1
             else:
                 punishX = 0
             if (actionStates[2] == 1 or actionStates[3] == 1) and previousY == playerData["y"]:
                 punishY += 1
                 if punishY > 2:
-                    reward -= 1
+                    reward -= .1
             else:
-                punishY = 0
+                punishY = 0"""
 
             if actionStates[8] == 1 and playerData["bombs"] == 0 and playerData["golden_bomb"] == 0:
-                reward -= 1
+                reward -= .1
             if actionStates[9] == 1 and playerData["full_charge1"] == 0:
-                reward -= 1
+                reward -= .1
             if actionStates[10] == 1 and playerData["card"] == 0 and playerData["pill"] == 0:
-                reward -= 1
+                reward -= .1
             if actionStates[11] == 1 and playerData["trinket1"] == 0:
-                reward -= 1
+                reward -= .1
 
             targets = []
             for y in range(roomY):
@@ -672,19 +673,19 @@ while True:
                     distance_covered = door_min_distances[key] - distance
                     total_distance = door_min_distances[key]
                     if cleared_status == 0:
-                        reward_increment = (1 / distance) * 100  # Full reward
+                        reward_increment = (1 / distance) * 1  # Full reward
                     else:
-                        reward_increment = (1 / distance) * 20
+                        reward_increment = (1 / distance) * 0.2
                     reward += reward_increment*targetMultiplier
                     door_min_distances[key] = distance  #Update door distance
 
-                if not closer_to_any_door:
+                """if not closer_to_any_door:
                     (xtile, ytile), cleared_status, (door_x, door_y), target_room = target
                     key = (xtile, ytile, target_room[0], target_room[1])  # Unique identifier for the door, including room coordinates
                     distance = ((agent_x - door_x) ** 2 + (agent_y - door_y) ** 2) ** 0.5
                     if distance > door_min_distances[key] and door_min_distances[key] > 20 and cleared_status == 0:
-                        punishment = -1
-                        reward += punishment*targetMultiplier
+                        punishment = -.01
+                        reward += punishment*targetMultiplier"""
 
             visited_rooms = sum(1 for y in range(floorGrid_normalized.shape[0]) for x in range(floorGrid_normalized.shape[1]) if floorGrid_normalized[y, x][3] == 1)
             if visited_rooms > 1 and visited_rooms > last_visited_rooms:
@@ -692,9 +693,9 @@ while True:
                 reward += 100
                 resetTimer += 250
             if lastRoom != room:
-                reward += .1
+                reward += .01
             if playerData["alive_enemies"] > 0 and totalHP >= roomHP:
-                reward += .1
+                reward += .01
                 resetTimer += .5
 
             if currentFloor != playerData["stage"]:
@@ -704,7 +705,7 @@ while True:
                     door_min_distances = {}
                     totalRoomGrid = np.zeros((105, 183, 13), dtype=np.float32)
                     totalRoomGrid[:, :, :3] = -0.2
-                    reward += 1000
+                    reward += 10
 
             total_reward += reward
 
@@ -718,12 +719,8 @@ while True:
                         f.write(msg)
                     done = True
                     print(f"Main loop step counter: {step_count}, Episode {agent.episode_counter}, Total Reward: {total_reward}")
-                    if total_reward > 0:
-                        positiveReward += 1
-                    else:
-                        positiveReward = 0
-                    if positiveReward > 20:
-                        freedom = True
+                    positiveReward += 1 if total_reward > 0 else -1
+                    freedom = True if positiveReward > 20 else False
                     total_reward = 0
                 states.append((final_state.clone().detach(), floorGrid_tensor.clone().detach(), additional_values_torch.clone().detach()))
                 actions.append(action)
