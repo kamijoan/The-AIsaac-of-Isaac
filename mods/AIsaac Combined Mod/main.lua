@@ -580,7 +580,7 @@ mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
     if instanceNumber == 0 then
         -- Show disabled status
         if pendingChanges then
-            displayText = "Instance: Disabled → " .. pendingNumber .. " (F3 to apply)"
+            displayText = "Instance: Disabled - " .. pendingNumber .. " (F3 to apply)"
         else
             displayText = "Instance: Disabled (F1/F2 to change)"
         end
