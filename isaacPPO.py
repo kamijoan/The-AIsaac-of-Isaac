@@ -13,9 +13,8 @@ class PPOPolicy(nn.Module):
         self.visualData = None
         self.isaacNumber = isaacNumber
 
-        # Single convolution for room_grid
-        if isaacNumber == 1:
-            convKernel = 5
+        if isaacNumber == 1: #Kernel to "extract" spatial info
+            convKernel = 4
         else:
             convKernel = 7
         self.room_conv = nn.Conv2d(4, 8, kernel_size=convKernel)
