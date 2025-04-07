@@ -4,6 +4,7 @@ Do you know about good code practices? Because I don't.
 
 It hasn't even solved picking where to move, current model selects a position in the grid and the game paths there.
 Current biggest issue with it, state representation is too bloated, and even when reduced to the minimum possible the changes from just isaac moving in that space seem to not be big enough.
+Proper reward planning might be a second problem, but right now it just memorizes the actions that reward it, the state doesn't clearly tell it why they do.
 
 ## To run it
 
