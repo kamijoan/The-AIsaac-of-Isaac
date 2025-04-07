@@ -2,16 +2,23 @@ local mod = RegisterMod("AIsaac_Combined_Mod", 1)
 
 -- ====================== VARIABLES ======================
 local game = Game()
-local inputs = {}  -- Store inputs
+local inputs = {}
+local lastInputData = ""  -- Track the last processed input
+local newInputData = nil  -- Store new input data temporarily
+local totalDamageDealt = 0  -- Total damage dealt to enemies
+local enemyHPBefore = {}  -- Store previous HP of enemies
+
 local sprite = Sprite()
 local hasReset = false  -- Track if the game was reset
-local previousEntityData = ""
-local previousRoomData = ""
 local totalDamageDealt = 0
 local enemyHPBefore = {}
 local instanceNumber = 0       -- Current active instance number
 local pendingNumber = 1        -- Pending instance number (not applied yet)
 local pendingChanges = false   -- Whether there are pending changes to apply
+
+-- ====================== PATHFINDING VARIABLES ======================
+local targetPosition = nil
+local lastTargetPosition = nil
 
 -- ====================== FILE PATHS ======================
 local function GetFilePaths()
@@ -38,6 +45,169 @@ local function GetFilePaths()
         input = "F:/IsaacInputs" .. instanceNumber .. ".txt",
         response = "F:/IsaacResponse" .. instanceNumber .. ".txt"
     }
+end
+
+-- ====================== PATHFIND ======================
+local waypoints = {}  -- Persistent waypoints
+
+local function HandlePathfinding()
+    if not targetPosition then
+        waypoints = {}
+        inputs[ButtonAction.ACTION_LEFT] = 0
+        inputs[ButtonAction.ACTION_RIGHT] = 0
+        inputs[ButtonAction.ACTION_UP] = 0
+        inputs[ButtonAction.ACTION_DOWN] = 0
+        return
+    end
+
+    local player = Isaac.GetPlayer(0)
+    local room = game:GetRoom()
+    local gridWidth = room:GetGridWidth()
+    local gridSize = room:GetGridSize()
+    local tileSize = 40
+
+    local playerPos = player.Position
+    local playerGridIndex = room:GetGridIndex(playerPos)
+    local targetGridIndex = room:GetGridIndex(targetPosition)
+
+    -- Validate target
+    if targetGridIndex < 0 or targetGridIndex >= gridSize then
+        waypoints = {}
+        inputs[ButtonAction.ACTION_LEFT] = 0
+        inputs[ButtonAction.ACTION_RIGHT] = 0
+        inputs[ButtonAction.ACTION_UP] = 0
+        inputs[ButtonAction.ACTION_DOWN] = 0
+        return
+    end
+    local targetEntity = room:GetGridEntity(targetGridIndex)
+    if targetEntity and (
+        targetEntity.CollisionClass == GridCollisionClass.COLLISION_PIT or
+        targetEntity.CollisionClass == GridCollisionClass.COLLISION_SOLID or
+        targetEntity.CollisionClass == GridCollisionClass.COLLISION_WALL
+    ) then
+        waypoints = {}
+        inputs[ButtonAction.ACTION_LEFT] = 0
+        inputs[ButtonAction.ACTION_RIGHT] = 0
+        inputs[ButtonAction.ACTION_UP] = 0
+        inputs[ButtonAction.ACTION_DOWN] = 0
+        return
+    end
+
+    -- Recalculate path if needed
+    if #waypoints == 0 or waypoints[#waypoints]:Distance(targetPosition) > tileSize then
+        waypoints = {}
+        local openSet = { playerGridIndex }
+        local cameFrom = {}
+        local gScore = { [playerGridIndex] = 0 }
+        local fScore = { [playerGridIndex] = playerPos:Distance(targetPosition) }
+        local closedSet = {}
+
+        while #openSet > 0 do
+            local currentIndex = openSet[1]
+            local lowestF = fScore[currentIndex]
+            for i, index in ipairs(openSet) do
+                if fScore[index] < lowestF then
+                    currentIndex = index
+                    lowestF = fScore[index]
+                end
+            end
+
+            if currentIndex == targetGridIndex then
+                local gridPath = {}
+                local tempIndex = currentIndex
+                while tempIndex do
+                    table.insert(gridPath, 1, tempIndex)
+                    tempIndex = cameFrom[tempIndex]
+                end
+                for _, gridIndex in ipairs(gridPath) do
+                    table.insert(waypoints, room:GetGridPosition(gridIndex))
+                end
+                break
+            end
+
+            for i, index in ipairs(openSet) do
+                if index == currentIndex then
+                    table.remove(openSet, i)
+                    break
+                end
+            end
+            closedSet[currentIndex] = true
+
+            -- Check all 8 neighbors (cardinal + diagonal)
+            local neighbors = {
+                currentIndex + 1,              -- Right
+                currentIndex - 1,              -- Left
+                currentIndex + gridWidth,      -- Down
+                currentIndex - gridWidth,      -- Up
+                currentIndex + 1 + gridWidth,  -- Down-Right
+                currentIndex - 1 + gridWidth,  -- Down-Left
+                currentIndex + 1 - gridWidth,  -- Up-Right
+                currentIndex - 1 - gridWidth   -- Up-Left
+            }
+            for _, neighbor in ipairs(neighbors) do
+                if neighbor >= 0 and neighbor < gridSize and not closedSet[neighbor] then
+                    local gridEntity = room:GetGridEntity(neighbor)
+                    if not gridEntity or (
+                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_NONE or
+                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_OBJECT or
+                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_WALL_EXCEPT_PLAYER
+                    ) then
+                        local isDiagonal = (neighbor == currentIndex + 1 + gridWidth or
+                                           neighbor == currentIndex - 1 + gridWidth or
+                                           neighbor == currentIndex + 1 - gridWidth or
+                                           neighbor == currentIndex - 1 - gridWidth)
+                        local cost = isDiagonal and tileSize * 1.414 or tileSize  -- Diagonal cost is sqrt(2) * tileSize
+                        local tentativeG = gScore[currentIndex] + cost
+                        if not gScore[neighbor] or tentativeG < gScore[neighbor] then
+                            cameFrom[neighbor] = currentIndex
+                            gScore[neighbor] = tentativeG
+                            fScore[neighbor] = gScore[neighbor] + room:GetGridPosition(neighbor):Distance(targetPosition)
+                            if not table.contains(openSet, neighbor) then
+                                table.insert(openSet, neighbor)
+                            end
+                        end
+                    end
+                end
+            end
+
+            if #openSet > 50 then break end
+        end
+
+        if #waypoints == 0 then
+            table.insert(waypoints, targetPosition)
+        end
+    end
+
+    -- Move toward next waypoint with smoother inputs
+    if #waypoints > 0 then
+        local nextWaypoint = waypoints[1]
+        local directionToNext = (nextWaypoint - playerPos):Normalized()
+        local distanceToNext = playerPos:Distance(nextWaypoint)
+
+        -- Smooth input values (0 to 1) based on direction
+        local inputThreshold = 0.05  -- Lowered for finer control
+        inputs[ButtonAction.ACTION_LEFT] = directionToNext.X < -inputThreshold and math.min(1, -directionToNext.X) or 0
+        inputs[ButtonAction.ACTION_RIGHT] = directionToNext.X > inputThreshold and math.min(1, directionToNext.X) or 0
+        inputs[ButtonAction.ACTION_UP] = directionToNext.Y < -inputThreshold and math.min(1, -directionToNext.Y) or 0
+        inputs[ButtonAction.ACTION_DOWN] = directionToNext.Y > inputThreshold and math.min(1, directionToNext.Y) or 0
+
+        -- Remove waypoint if close enough
+        if distanceToNext < 15 then  -- Adjusted threshold
+            table.remove(waypoints, 1)
+        end
+    else
+        inputs[ButtonAction.ACTION_LEFT] = 0
+        inputs[ButtonAction.ACTION_RIGHT] = 0
+        inputs[ButtonAction.ACTION_UP] = 0
+        inputs[ButtonAction.ACTION_DOWN] = 0
+    end
+end
+
+function table.contains(tbl, value)
+    for _, v in ipairs(tbl) do
+        if v == value then return true end
+    end
+    return false
 end
 -- ====================== SPRITES SETUP ======================
 -- Sprite filenames
@@ -95,8 +265,6 @@ local function ClearFiles()
     end
 
     -- Reset variables
-    previousEntityData = ""
-    previousRoomData = ""
     totalDamageDealt = 0
     enemyHPBefore = {}
 end
@@ -124,26 +292,41 @@ local function resetGame()
     Isaac.ExecuteCommand("restart")
 end
 
+-- ====================== INPUT READING ======================
 local function ReadInputsFromFile()
     local paths = GetFilePaths()
     local file = io.open(paths.input, "r")
-    if file then
-        local data = file:read("*a")
-        file:close()
-        if data then
-            if data:find("reset") then
-                resetGame()
-                return
-            end
-            inputs = {}
-            for action, value in string.gmatch(data, "(%d+) (%d+)") do
-                inputs[tonumber(action)] = tonumber(value)
-            end
-            WriteFile(paths.response, data)
-        end
-    end
-end
+    if not file then return false end
 
+    local data = file:read("*a")
+    file:close()
+
+    if data:find("reset") then
+        resetGame()
+        lastInputData = data
+        newInputData = data
+        return true
+    else
+        if data == lastInputData then return false end
+    end
+
+    -- Reset inputs
+    inputs = {}
+
+    -- Parse target position
+    local x, y = data:match("target_position:(%d+%.?%d*),(%d+%.?%d*)")
+    if x and y then
+        x, y = tonumber(x), tonumber(y)
+        local room = game:GetRoom()
+        targetPosition = Vector(x, y)
+    else
+        print("Failed to parse target position from: " .. data)
+    end
+
+    -- Store new input but don’t write response yet
+    newInputData = data
+    return true
+end
 -- ====================== FEATURE: DAMAGE TRACKING ======================
 local function WriteDamageToFile()
     WriteFile(GetFilePaths().damageData, tostring(totalDamageDealt))
@@ -268,7 +451,7 @@ local function ScanRooms()
         local index = roomDesc.SafeGridIndex
         local listIndex = roomDesc.ListIndex
         local roomType = roomDesc.Data and roomDesc.Data.Type or 0
-        local seen = roomDesc.VisitedCount > 0 and 1 or 0
+        local visited = roomDesc.VisitedCount > 0 and 1 or 0
         local isClear = roomDesc.Clear and 1 or 0
         local shape = roomDesc.Data and roomDesc.Data.Shape or 1  -- Default to normal room
 
@@ -314,19 +497,11 @@ local function ScanRooms()
             if idx == 0 then
                 table.insert(roomData, "0,0,0,0,0,0")  -- Fill missing room tiles with zeros
             else
-                table.insert(roomData, string.format("%d,%d,%d,%d,%d,%d", idx, listIndex, roomType, seen, isClear, isCurrent))
+                table.insert(roomData, string.format("%d,%d,%d,%d,%d,%d", idx, listIndex, roomType, visited, isClear, isCurrent))
             end
         end
     end
-
-    -- Convert table to a single string for comparison
-    local currentRoomData = table.concat(roomData, "\n")
-
-    -- Write only if data has changed
-    if currentRoomData ~= previousRoomData then
-        WriteFile(paths.floorData, currentRoomData)
-        previousRoomData = currentRoomData
-    end
+    WriteFile(paths.floorData, table.concat(roomData, "\n"))
 end
 
 -- ====================== FEATURE: ENTITY SCANNING ======================
@@ -439,19 +614,11 @@ local function ScanEntities()
             end
         end
     end
-
-    local currentEntityData = table.concat(entities, "|")
-
-    if currentEntityData ~= previousEntityData then
-        WriteFile(paths.entityData, currentEntityData)
-        previousEntityData = currentEntityData
-    end
+    WriteFile(paths.entityData, table.concat(entities, "|"))
 end
 
 -- ====================== CALLBACKS ======================
-
--- For entity damage tracking
-mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity, amount, damageFlags, damageSource)
+mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity, amount, damageFlags, damageSource) --track damage to enemies
     if entity:IsVulnerableEnemy() then
         local id = entity.InitSeed  -- Unique ID for the enemy
         local prevHP = enemyHPBefore[id] or entity.HitPoints
@@ -459,13 +626,17 @@ mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity, amount, dam
         -- Only log damage if HP actually decreases
         if entity.HitPoints < prevHP then
             totalDamageDealt = totalDamageDealt + (prevHP - entity.HitPoints)
-            WriteDamageToFile()
+            -- Do not call WriteDamageToFile() here; defer to MC_POST_UPDATE
         end
 
         -- Update stored HP
         enemyHPBefore[id] = entity.HitPoints
     end
 end)
+
+local function WriteDamageToFile()
+    WriteFile(GetFilePaths().damageData, tostring(totalDamageDealt))
+end
 
 -- For game start/reset
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, isContinued)
@@ -484,123 +655,103 @@ mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, isContinued)
     enemyHPBefore = {}
 end)
 
--- For regular updates (most functions)
+-- ====================== POST UPDATE ======================
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
-    -- Check for F1 (decrease) and F2 (increase) keys
     if Input.IsButtonTriggered(Keyboard.KEY_F1, 0) then
         pendingNumber = math.max(0, pendingNumber - 1)
-        pendingChanges = true  -- Mark that we have pending changes
+        pendingChanges = true
     end
     if Input.IsButtonTriggered(Keyboard.KEY_F2, 0) then
         pendingNumber = pendingNumber + 1
-        pendingChanges = true  -- Mark that we have pending changes
+        pendingChanges = true
     end
-
-    -- Check for F3 (apply changes) - don't allow locking on 0
     if Input.IsButtonTriggered(Keyboard.KEY_F3, 0) and pendingChanges then
         if pendingNumber > 0 then
             instanceNumber = pendingNumber
-            ClearFiles() -- Clear files when changing instance
+            ClearFiles()
+            totalDamageDealt = 0  -- Reset damage on instance change
+            enemyHPBefore = {}
         else
-            -- If trying to set to 0, just disable file operations
             instanceNumber = 0
-            -- No need to clear files since we're disabling
         end
-        pendingChanges = false -- Reset pending changes flag
+        pendingChanges = false
+        lastInputData = ""
+        newInputData = nil
     end
 
-    -- Only read/write files if instance number > 0
     if instanceNumber > 0 then
-        ReadInputsFromFile()
-        RemoveEnemies()
-        ScanEntities()
-        ScanRooms()
+        local inputChanged = ReadInputsFromFile()
+
+        if inputChanged then
+            HandlePathfinding()
+            RemoveEnemies()
+            ScanEntities()
+            ScanRooms()
+            LogRoomTiles()
+            WritePlayerData()
+            WriteDamageToFile()  -- Write damage here, after other updates
+
+            if newInputData then
+                WriteFile(GetFilePaths().response, newInputData)
+                lastInputData = newInputData
+                newInputData = nil
+            end
+        end
     end
 end)
 
--- For rendering input feedback - Updated with dynamic scaling
-mod:AddCallback(ModCallbacks.MC_POST_RENDER, function()
-    -- Get current screen size
+mod:AddCallback(ModCallbacks.MC_POST_RENDER, function() --rendering stuff in screen
     local screenWidth = Isaac.GetScreenWidth()
     local screenHeight = Isaac.GetScreenHeight()
-
-    -- Calculate scaling factor
-    local scaleX = screenWidth / 800  -- Scale relative to a reference width
-    local scaleY = screenHeight / 600  -- Scale relative to a reference height
-    local scale = math.min(scaleX, scaleY)  -- Maintain aspect ratio
-
-    -- Offsets for positioning
-    local xOffset = 30 * scale  -- Adjust left/right position
-    local yOffset = screenHeight - 30  -- Position near the bottom
-
-    -- Adjust spacing dynamically
-    local spacing = 30 * scale  -- Scale spacing between keys
-    local startX = xOffset  -- Position from the left side
-
-    -- Find max yPos to flip rows correctly
+    local scaleX = screenWidth / 800
+    local scaleY = screenHeight / 600
+    local scale = math.min(scaleX, scaleY)
+    local xOffset = 30 * scale
+    local yOffset = screenHeight - 30
+    local spacing = 30 * scale
+    local startX = xOffset
     local maxY = 0
     for _, key in ipairs(keyActions) do
         if key.yPos > maxY then
             maxY = key.yPos
         end
     end
-
-    -- Input display
     for _, key in ipairs(keyActions) do
         local xPos = startX + key.xOffset * spacing
-        local yPos = yOffset - ((maxY - key.yPos) * scale)  -- Flip Y ordering
-
-        sprite.Scale = Vector(scale, scale)  -- Apply sprite scaling
-
+        local yPos = yOffset - ((maxY - key.yPos) * scale)
+        sprite.Scale = Vector(scale, scale)
         if inputs[key.action] == 1 then
-            sprite:SetFrame(key.anim, 1)  -- Fully visible frame
+            sprite:SetFrame(key.anim, 1)
         else
-            sprite:SetFrame(key.anim, 0)  -- Transparent frame
+            sprite:SetFrame(key.anim, 0)
         end
-
         sprite:Render(Vector(xPos, yPos), Vector(0, 0), Vector(0, 0))
     end
-
-    -- Log room tiles and player data in post render for consistent timing
-    LogRoomTiles()
-    WritePlayerData()
-
-    -- Instance number controls UI
     local font = Font()
     font:Load("font/terminus.fnt")
-
-    -- Calculate position in bottom-left corner
-    local screenHeight = Isaac.GetScreenHeight()
-    local x = 3  -- Very left edge with small padding
-    local y = screenHeight - 10  -- Very bottom with small padding
-
-
-    -- Display text based on status
+    local x = 3
+    local y = screenHeight - 10
     local displayText
     if instanceNumber == 0 then
-        -- Show disabled status
         if pendingChanges then
             displayText = "Instance: Disabled - " .. pendingNumber .. " (F3 to apply)"
         else
             displayText = "Instance: Disabled (F1/F2 to change)"
         end
     else
-        -- Normal instance display
         if pendingChanges then
             displayText = "Instance: " .. instanceNumber .. " - " .. pendingNumber .. " (F3 to apply)"
         else
             displayText = "Instance: " .. instanceNumber
         end
     end
-
-    -- Render the text
     Isaac.RenderScaledText(displayText, x, y, 1, 1, 1, 1, 1, 1)
-
 end)
 
 
--- For input handling
+-- ====================== MODIFIED INPUT HANDLING ======================
 mod:AddCallback(ModCallbacks.MC_INPUT_ACTION, function(_, entity, _, buttonAction)
+    -- Fall back to original input handling
     local inputValue = inputs[buttonAction]
     if inputValue == 0 then
         inputValue = nil
