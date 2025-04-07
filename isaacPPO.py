@@ -7,19 +7,20 @@ from math import ceil
 class PPOPolicy(nn.Module):
     def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, lstm_hidden_size = 512):
         super(PPOPolicy, self).__init__()
-        self.room_shape = room_shape  # [4, 16, 28]
+        self.room_shape = room_shape  # [14, 16, 28]
         self.map_shape = map_shape    # [6, 13, 13]
         self.n_critical = n_critical
-        self.n_items = n_items
-        self.n_entity_memory = n_entity_memory
+        #self.n_items = n_items
+        #self.n_entity_memory = n_entity_memory
         self.isaacNumber = isaacNumber
         self.visualData = []
 
-        # Room grid processing
-        self.room_conv1 = nn.Conv2d(4, 16, kernel_size=3, padding=1)
-        self.room_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.room_conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         room_out_channels = 64
+        # Room grid processing
+        self.room_conv1 = nn.Conv2d(room_shape[0], 16, kernel_size=3, padding=1)
+        self.room_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.room_conv3 = nn.Conv2d(32, room_out_channels, kernel_size=3, padding=1)
+
         self.room_pool = nn.MaxPool2d(2)
         room_out_size = room_out_channels * 8 * 14  # 16x28 → 8x14 after pooling
 
@@ -28,15 +29,16 @@ class PPOPolicy(nn.Module):
         self.map_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
         map_out_size = 32 * 13 * 13  # No pooling, stays 13x13
 
+        critical_out_size = 256
         # Critical values processing
         self.critical_fc = nn.Sequential(
-            nn.Linear(8, 64),
+            nn.Linear(n_critical, 64),
             nn.LeakyReLU(0.1),
             nn.Linear(64, 128),
             nn.LeakyReLU(0.1),
-            nn.Linear(128, 256)
+            nn.Linear(128, critical_out_size)
         )
-        critical_out_size = 256
+
 
         # Combined features
         total_features = room_out_size + map_out_size + critical_out_size
@@ -61,7 +63,6 @@ class PPOPolicy(nn.Module):
         batch_size = room_grid.size(0)
 
         # Room grid processing
-        room_grid = room_grid[:, :4, :, :]
         x_room = F.leaky_relu(self.room_conv1(room_grid), 0.1)
         x_room = F.leaky_relu(self.room_conv2(x_room), 0.1)
         x_room = F.leaky_relu(self.room_conv3(x_room), 0.1)
@@ -74,8 +75,7 @@ class PPOPolicy(nn.Module):
         x_map = x_mapV.view(batch_size, -1)
 
         # Critical values processing
-        indices = torch.tensor([0, 1, 2, 3, 11, 12, 13, 14], device=room_grid.device)
-        x_critical = self.critical_fc(additional_values[:, indices])
+        x_critical = self.critical_fc(additional_values[:, :self.n_critical])
 
         x = torch.cat([x_room, x_map, x_critical], dim=1)
         x = F.leaky_relu(self.pre_lstm_fc(x), 0.1)  # Reduce size before LSTM
@@ -137,7 +137,7 @@ class PPOPolicy(nn.Module):
                 self.visualData[index] = data_padded.view(batch_size, channels, viewY, viewX)
 
 class PPOAgent:
-    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, clip_param=0.2, value_loss_coef=0.5, gamma=0.99, max_grad_norm=0.5, n_steps=2048):
+    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, clip_param=0.2, value_loss_coef=0.5, gamma=0.9, max_grad_norm=0.5, n_steps=2048):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = PPOPolicy(room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber).to(self.device)
         # Share the policy's parameters across processes
@@ -193,13 +193,20 @@ class PPOAgent:
         next_states = states[1:]
         states = states[:-1]
         values = torch.cat(values).squeeze(-1)
-        next_room_grids, next_map_grids, next_adds, next_hidden = self._process_state_batch(next_states, next_hidden_states)
-        with torch.no_grad():
-            _, next_value, _ = self.policy(next_room_grids, next_map_grids, next_adds, next_hidden)
-        next_value = next_value.squeeze(-1)
+        # Chunk next_value computation
+        next_value_chunks = []
+        for i in range(0, len(next_states), batch_size):
+            chunk_states = next_states[i:i + batch_size]
+            chunk_hidden = next_hidden_states[i:i + batch_size]
+            room_grids, map_grids, adds, hidden = self._process_state_batch(chunk_states, chunk_hidden)
+            with torch.no_grad():
+                _, chunk_value, _ = self.policy(room_grids, map_grids, adds, hidden)
+            next_value_chunks.append(chunk_value.squeeze(-1))
+            del room_grids, map_grids, adds, hidden
+        next_value = torch.cat(next_value_chunks)
         rewards = torch.tensor(rewards, device=self.device)
         dones = torch.tensor(dones, dtype=torch.float32, device=self.device)
-        advantages = rewards - values + next_value * (1 - dones)
+        advantages = rewards - values + next_value * (1 - dones) * self.gamma
         print(f"{self.isaacNumber}. Advantages not normalized - Mean: {advantages.mean():.4f}, Std: {advantages.std():.4f}")
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
