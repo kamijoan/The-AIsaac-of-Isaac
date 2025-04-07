@@ -2,6 +2,11 @@
 Just a bad Python reinforcement learning Torch implementation.
 Do you know about good code practices? Because I don't.
 
+It hasn't even solved picking where to move, current model selects a position in the grid and the game paths there.
+Current biggest issue with it, state representation is too bloated, and even when reduced to the minimum possible the changes from just isaac moving in that space seem to not be big enough.
+
+## To run it
+
 Requires Python 3.12.x
 
 And probably CUDA installed and compatible.
