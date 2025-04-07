@@ -12,22 +12,24 @@ from isaacPPO import PPOPolicy, PPOAgent
 #from isaacPPOTransformer import PPOPolicy, PPOAgent
 
 def run_instance(isaacNumber, control_dict, learn_lock):
+
     def execute_action(action, actionStates, actionCounter, isaacNumber):
         actionCounter += 1
-        if action < action_size:
+        """if action < action_size:
             if action in opposite_actions:
                 opposite = opposite_actions[action]
                 actionStates[opposite] = 0
             elif action in shooting_actions:
                 for shoot_action in shooting_actions:
                     actionStates[shoot_action] = 0
-            # Apply the new action state
             actionStates[action] = 1
         #elif action == action_size-1:
         #    for k in actionStates:
         #        actionStates[k] = 0
 
         msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + f" {actionCounter}"
+        """
+        msg = f"target_position:{action[0]},{action[1]} {actionCounter}"
         with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
             f.write(msg)
         while True:
@@ -38,30 +40,26 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         return list(actionStates.values()),actionStates, actionCounter  # Return full state list
 
     def readGameData(isaacNumber, playerData):
-        while True:
-            try:
-                with open(f"F:/IsaacData{isaacNumber}.txt", "r") as file:
-                    data = file.read().strip()
-                for item in data.split(","):
-                    if "=" in item:
-                        key, value = item.split("=")
-                        if key == "items":
-                            try:
-                                playerData[key] = list(map(int, value.strip("[]").split("|")))
-                            except:
-                                playerData["items"] = []
-                        elif key in playerNormalization:
-                            playerData[key] = float(value) / playerNormalization[key]
-                            if playerData[key] > 1 or playerData[key] < -1:
-                                print("Normalized Stat problem:",key,playerData[key])
-                        elif key in playerData:
-                            playerData[key] = int(value)
+        with open(f"F:/IsaacData{isaacNumber}.txt", "r") as file:
+            data = file.read().strip()
+        for item in data.split(","):
+            if "=" in item:
+                key, value = item.split("=")
+                if key == "items":
+                    try:
+                        playerData[key] = list(map(int, value.strip("[]").split("|")))
+                    except:
+                        playerData["items"] = []
+                elif key in playerNormalization:
+                    playerData[key] = float(value) / playerNormalization[key]
+                    if playerData[key] > 1 or playerData[key] < -1:
+                        print("Normalized Stat problem:",key,playerData[key])
+                elif key in playerData:
+                    playerData[key] = int(value)
 
-                totalHP = playerData["hp"]+playerData["soul_hp"]+playerData["black_hp"]+playerData["rotten_hp"]+playerData["bone_hp"]+playerData["eternal_hp"]+playerData["extra_lives"]
-                dataValues = [v for k, v in playerData.items() if isinstance(v, (float))] #ignores item list and timer int
-                return playerData, totalHP, dataValues
-            except:
-                pass
+        totalHP = playerData["hp"]+playerData["soul_hp"]+playerData["black_hp"]+playerData["rotten_hp"]+playerData["bone_hp"]+playerData["eternal_hp"]+playerData["extra_lives"]
+        dataValues = [v for k, v in playerData.items() if isinstance(v, (float))] #ignores item list and timer int
+        return playerData, totalHP, dataValues
 
     def precompute_gaussian_kernel(size, sigma):
         x = np.linspace(-(size // 2), size // 2, size)
@@ -150,24 +148,24 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         while True:
             timer += 1
             sleep(1/30)
-            overlay = np.zeros((500,250,3), dtype=np.uint8)
+            overlay = np.zeros((500, 250, 3), dtype=np.uint8)
             tile_size = 4
             try:
-                for y in range(roomY):  # Loop through grid height
-                    for x in range(roomX):  # Loop through grid width
-                        tile = roomGrid_normalized[y][x]  # Get tile data
-                        if tile[0] > 0:  # Draw only non-zero tiles
+                # Existing room grid drawing
+                for y in range(16):
+                    for x in range(28):
+                        tile = roomGridSection[y][x]
+                        if tile[0] > 0:
                             top_left = ((x * tile_size) + 2, (y * tile_size) + 10)
                             bottom_right = (((x + 1) * tile_size) + 2, ((y + 1) * tile_size) + 10)
                             hue = int(tile[0] * 180)
-                            #print(tile)
                             color = hsv_to_bgr(hue, 200, int(50 + 160 * (tile[1])))
-                            # Draw rectangle
                             cv2.rectangle(overlay, top_left, bottom_right, color, -1)
 
-                for y in range(floorGrid_normalized.shape[0]):  # Iterate over rows (13)
-                    for x in range(floorGrid_normalized.shape[1]):  # Iterate over columns (13)
-                        room_number, room_id, room_type, visited, cleared, current = floorGrid_normalized[y, x]  # Unpack values
+                # Existing floor grid drawing
+                for y in range(floorGrid_normalized.shape[0]):
+                    for x in range(floorGrid_normalized.shape[1]):
+                        room_number, room_id, room_type, visited, cleared, current = floorGrid_normalized[y, x]
                         if room_id > 0:
                             top_left = ((x * tile_size) + 120, (y * tile_size) + 10)
                             bottom_right = (((x + 1) * tile_size) + 120, ((y + 1) * tile_size) + 10)
@@ -177,40 +175,58 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                                 outline = 1
                             multiplier = 2 if current == 1 else 1.5
                             hue = int(room_type * 180)
-                            color = hsv_to_bgr(hue, 150, 100*multiplier)
-
+                            color = hsv_to_bgr(hue, 150, 100 * multiplier)
                             cv2.rectangle(overlay, top_left, bottom_right, color, outline)
-                cv2.circle(overlay, (int(playerData["x"]*playerNormalization["x"]/10), int(playerData["y"]*playerNormalization["y"]/10)), 2, (0, 255, 0), -1)  # player display
+
+                cv2.circle(overlay, (int(playerData["x"] * playerNormalization["x"] / 10), int(playerData["y"] * playerNormalization["y"] / 10)), 2, (0, 255, 0), -1)
                 for entity in entitiesList:
                     hue = int(entity[1] * 180)
                     color = hsv_to_bgr(hue, 150, 150)
-                    cv2.circle(overlay, (int(entity[2]*entitiesNormalization[2]/10), int(entity[3]*entitiesNormalization[3]/10)), 1, color, -1) #entity display
+                    cv2.circle(overlay, (int(entity[2] * entitiesNormalization[2] / 10), int(entity[3] * entitiesNormalization[3] / 10)), 1, color, -1)
 
                 if len(targets) > 0:
-                    for door in targets:
-                        x,y = door[2]
-                        cv2.circle(overlay, (int(x/10),int(y/10)), 1, (255, 0, 0), -1)  # player display
+                    for target in targets:
+                        x, y = target[0]
+                        x = (x + 1) * 40
+                        y = (y + 3) * 40
+                        cv2.circle(overlay, (int(x / 10), int(y / 10)), 1, (255, 0, 0), -1)
+                cv2.circle(overlay, (int(agent_target_x / 10), int(agent_target_y / 10)), 2, (2, 2, 255), 0)
 
-                probs_list_values = agent.probs.squeeze().cpu().tolist()
-                min_prob = min(probs_list_values)
-                max_prob = max(probs_list_values)
-                graphProbs = [(p - min_prob) / (max_prob - min_prob + 1e-6) * 100 for p in probs_list_values]
                 entropy = -torch.sum(agent.probs * torch.log(agent.probs + 1e-6))
                 max_entropy = np.log(action_size)
                 randomness = (entropy / max_entropy) * 100
                 randomness = min(max(randomness, 0), 100)
 
-                #extra text
-                reward_color = (0, 255, 0) if reward >= 0 else (0, 0, 255)  # Green if positive, Red if negative
-                reward_color = (255,255,255) if reward == 0.0 else reward_color
+                reward_color = (0, 255, 0) if reward >= 0 else (0, 0, 255)
+                reward_color = (255, 255, 255) if reward == 0.0 else reward_color
                 cv2.putText(overlay, f"Total Reward: {total_reward:.2f}, Reward:", (2, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 (text_width, _), _ = cv2.getTextSize(f"Total Reward: {total_reward:.2f}, Reward:", cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)
                 cv2.putText(overlay, f"{reward:+.3f}", (2 + text_width, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, reward_color, 1)
-                cv2.putText(overlay,f"Reset in {resetTimer+1-step_count} | Randomness: {randomness:.2f}%",(2,100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                #cv2.putText(overlay,f"{str(keyboardKeys)}",(2,110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                cv2.putText(overlay,f"Episode: {agent.episode_counter}",(2,110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                cv2.putText(overlay, f"Reset in {resetTimer + 1 - step_count} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                cv2.putText(overlay, f"Episode: {agent.episode_counter}", (2, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
-                bar_width = 4  # Width of each bard
+                probs_list_values = agent.probs.squeeze().cpu().tolist()
+                min_prob = min(probs_list_values)
+                max_prob = max(probs_list_values)
+                graphProbs = [(p - min_prob) / (max_prob - min_prob + 1e-6) * 100 for p in probs_list_values]  # Normalized to 0-100
+                prob_grid = np.array(graphProbs).reshape(16, 28)  # Your 16x28 grid
+                prob_offset_x = 2
+                prob_offset_y = 115
+                for y in range(16):  # prob_grid is 16x28
+                    for x in range(28):
+                        prob = prob_grid[y, x]
+                        if prob > 0:  # Only draw non-zero probabilities
+                            top_left = ((x * tile_size) + prob_offset_x, (y * tile_size) + prob_offset_y)
+                            bottom_right = (((x + 1) * tile_size) + prob_offset_x, ((y + 1) * tile_size) + prob_offset_y)
+                            hue = int(240 - (prob * 240 / 100))  # 240 (blue) to 0 (red)
+                            color = hsv_to_bgr(hue, 255, 200)
+                            cv2.rectangle(overlay, top_left, bottom_right, color, -1)
+                            # Optional transparency
+                            overlay[top_left[1]:bottom_right[1], top_left[0]:bottom_right[0]] = \
+                                cv2.addWeighted(overlay[top_left[1]:bottom_right[1], top_left[0]:bottom_right[0]], 0.5,
+                                                np.full((tile_size, tile_size, 3), color, dtype=np.uint8), 0.5, 0)
+
+                """bar_width = 4  # Width of each bard
                 gap = 10  # Gap between bars
                 max_value = max(graphProbs)  # Maximum value for scaling
                 num_actions = len(graphProbs)  # Number of actions
@@ -235,7 +251,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         # Draw the letter below the bar
                         text_x = x1 + bar_width // 4  # Center the letter under the bar
                         text_y = y1 + 10  # Place slightly below the bar
-                        cv2.putText(overlay, letter, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(overlay, letter, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)"""
                 #learn() progress bar
                 cv2.rectangle(overlay, (0,190),(int((len(states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
                 cv2.rectangle(overlay, (0,190),(int((agent.progress / 100) * overlay.shape[1]),200), (50,200,50), -1)
@@ -476,13 +492,14 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     lenEntitiesMemory = 200
     numEntityValues = 11
     num_additional_values = len(keyboardKeys)+len(playerNormalization)+len(itemArray)+(lenEntitiesMemory*numEntityValues)
-    action_size = 4
+    action_size = 448
+    roomChannels = 14
 
-    agent = PPOAgent(room_shape=(13, 16, 28),map_shape=(6, 13, 13),action_size=action_size,n_critical=len(keyboardKeys) + len(playerNormalization),n_items=len(itemArray),n_entity_memory=(lenEntitiesMemory * numEntityValues), isaacNumber=isaacNumber)
+    agent = PPOAgent(room_shape=(roomChannels, 16, 28),map_shape=(6, 13, 13),action_size=action_size,n_critical=len(keyboardKeys) + len(playerNormalization),n_items=len(itemArray),n_entity_memory=(lenEntitiesMemory * numEntityValues), isaacNumber=isaacNumber)
 
     emptyFloorTensor = torch.empty((1,6,13,13), dtype=torch.float32, device="cuda")
     emptyAdditionalValues = torch.empty((1,num_additional_values), dtype=torch.float32, device="cuda")
-    emptyFinalState = torch.empty((1,13,16,28), dtype=torch.float32, device="cuda")
+    emptyFinalState = torch.empty((1,roomChannels,16,28), dtype=torch.float32, device="cuda")
 
     roomX,roomY = 15,9
     overlay_thread = Thread(target=drawOverlay, daemon=True)
@@ -573,11 +590,13 @@ def run_instance(isaacNumber, control_dict, learn_lock):
             lastRoom = 84
             resetTimer = 500
 
-            door_min_distances = {}
+            target_potential_reward = {}
+            room_visits = {}
+            room_visits[84] = room_visits.get(84, 0) + 1
 
             itemArray = np.zeros(50, dtype=np.float32)
             entitiesListFull = np.zeros((lenEntitiesMemory, numEntityValues), dtype=np.float32)
-            totalRoomGrid = np.zeros((105, 183, 13), dtype=np.float32)
+            totalRoomGrid = np.zeros((105, 183, roomChannels), dtype=np.float32)
             totalRoomGrid[:, :, :3] = -0.2
 
             hidden_state = None
@@ -589,12 +608,15 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 step_count += 1
 
                 action, log_prob, value, hidden_state = agent.act((final_state, floorGrid_tensor, additional_values_tensor),hidden_state)
+                agent_target_x = 40.0 + (action % 28) * 40
+                agent_target_y = 120.0 + (action // 28) * 40
+
                 log_probs_list.append(log_prob)
                 values_list.append(value)
                 hidden_states.append(hidden_state)
 
                 if not manualTesting and not manualLearning:
-                    keyboardKeys, actionStates, actionCounter = execute_action(action, actionStates, actionCounter, isaacNumber)
+                    keyboardKeys, actionStates, actionCounter = execute_action((agent_target_x, agent_target_y), actionStates, actionCounter, isaacNumber)
                 """elif manualLearning:
                     action = deduce_action()
                     update_actionStates()
@@ -603,34 +625,24 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 floorGrid = np.full((13, 13, 6), -.2, dtype=np.float32)
                 with open(f"F:/IsaacFloorData{isaacNumber}.txt", "r") as file:
                     for line in file:
-                        gridIndex, listIndex, roomType, seen, clear, current = map(int, line.strip().split(","))
+                        gridIndex, listIndex, roomType, visited, clear, current = map(int, line.strip().split(","))
                         row, col = divmod(gridIndex, 13)
                         if roomType != 0:
-                            floorGrid[row, col] = [gridIndex, listIndex + 1, roomType, seen, clear, current]
+                            floorGrid[row, col] = [gridIndex, listIndex + 1, roomType, visited, clear, current]
                 floorGrid_normalized = floorGrid / np.array([200, 50, 30, 1, 1, 1], dtype=np.float32)
                 out_of_bounds = (floorGrid_normalized < -1) | (floorGrid_normalized > 1)
                 if np.any(out_of_bounds):
                     print("FloorGrid Normalization Problem:", floorGrid_normalized[out_of_bounds])
                     print(floorGrid)
                 floorGrid_resized = np.transpose(floorGrid_normalized, (2, 0, 1))
-                current_rooms = []
-                for y in range(floorGrid_normalized.shape[0]):
-                    for x in range(floorGrid_normalized.shape[1]):
-                        room_number, room_id, room_type, visited, cleared, current = floorGrid_normalized[y, x]
-                        if current == 1:
-                            current_rooms.append((x, y, room_number))  # Store coordinates of rooms in the current big room
 
-                while True:
-                    try:
-                        with open(f"F:/IsaacTileData{isaacNumber}.txt", "r") as file:
-                            first_line = file.readline()
-                            tile_data = file.readlines()
-                            room, roomX, roomY = map(int, first_line.split(","))
-                            roomGrid = np.array([list(map(int, line.strip().split(","))) for line in tile_data], dtype=np.int32)
-                            roomGrid = roomGrid.reshape((roomY, roomX, 3))
-                            break
-                    except:
-                        pass
+                with open(f"F:/IsaacTileData{isaacNumber}.txt", "r") as file:
+                    first_line = file.readline()
+                    tile_data = file.readlines()
+                    room, roomX, roomY = map(int, first_line.split(","))
+                    roomGrid = np.array([list(map(int, line.strip().split(","))) for line in tile_data], dtype=np.int32)
+                    roomGrid = roomGrid.reshape((roomY, roomX, 3))
+
                 roomGrid_normalized = roomGrid / np.array([27, 5, 1000], dtype=np.float32)
                 out_of_bounds = (roomGrid_normalized < -1) | (roomGrid_normalized > 1)
                 if np.any(out_of_bounds):
@@ -667,7 +679,16 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     entitiesListFull = np.zeros((lenEntitiesMemory, numEntityValues), dtype=np.float32)
 
                 entitiesGrids = entityHeatmaps(entitiesList)
-                if len(current_rooms) != 0 and any(room_number == room/200 for _, _, room_number in current_rooms):
+
+                current_rooms = []
+                for y in range(13):
+                    for x in range(13):
+                        room_number, room_id, room_type, visited, cleared, current = floorGrid[y, x]
+                        if current == 1:
+                            current_rooms.append((x, y, int(room_number)))  # Store coordinates of rooms in the current big room
+
+
+                if len(current_rooms) != 0 and any(room_number == room for _, _, room_number in current_rooms):
                     minRoom_x = min(x for x, y, _ in current_rooms)
                     minRoom_y = min(y for x, y, _ in current_rooms)
                     target_x = 15 + (minRoom_x - 1) * 14 if minRoom_x > 0 else 0
@@ -675,129 +696,185 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     valid_mask = np.any(roomGrid_normalized != -0.2, axis=-1)
                     totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, :3][valid_mask] = roomGrid_normalized[valid_mask]
                     entitiesGrids = np.transpose(entitiesGrids, (1, 2, 0))  # Shape: (16,28,9)
-                    totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 4:13][valid_mask] = entitiesGrids[:roomY, :roomX, :][valid_mask]
+                    totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 5:roomChannels][valid_mask] = entitiesGrids[:roomY, :roomX, :][valid_mask]
 
-                roomGridSection = totalRoomGrid[target_y:target_y+16, target_x:target_x+28, :]
-                playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
-                agent_x = playerData["x"]*playerNormalization["x"]
-                agent_y = playerData["y"]*playerNormalization["y"]
-                playerGrid = playerHeatmap(agent_x, agent_y)
-                roomGridSection[:, :, 3] = playerGrid
-                roomGridSection = np.transpose(roomGridSection, (2, 0, 1))  #(13,16,28)
-
-                itemArray = np.zeros(50, dtype=np.float32)
-                if len(playerData["items"]) > 0:
-                    normalized_values = [value / 800 for value in playerData["items"]]
-                    itemArray[:len(normalized_values)] = normalized_values
-                additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32),np.array(dataValues, dtype=np.float32),itemArray, entitiesListFull.flatten()])
-
-                # 0 to 2 are the tile id, collision and state. 3 is player heatmap. 4 to 12 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laaser,effect,slot+beggar.
-                final_state = emptyFinalState.copy_(torch.from_numpy(roomGridSection).unsqueeze(0))
-                floorGrid_tensor = emptyFloorTensor.copy_(torch.from_numpy(floorGrid_resized).unsqueeze(0))
-                additional_values_tensor = emptyAdditionalValues.copy_(torch.from_numpy(additional_values).unsqueeze(0))
-
-                #Rewards
-                while True:
-                    try:
-                        with open(f"F:/IsaacEnemyDamage{isaacNumber}.txt", "r") as file:
-                            currentEnemyDamage = float(file.read())
-                            break
-                    except:
-                        pass
-
-                damageDifference = currentEnemyDamage - lastEnemyDamage
-
-                itemsSum = len(playerData["items"])
-                pickups = playerData["bombs"] + playerData["coins"] + playerData["keys"]
-
-                reward = (itemsSum - previousItemsSum)/10# + ((totalHP - previousHP)) + (damageDifference/10)
-
-                if pickups > previousPickups:
-                    reward += .1 * pickups
-
-                if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
-                    punishX += 1
-                    if punishX > 2:
-                        reward -= .01
-                else:
-                    punishX = 0
-                if (actionStates[2] == 1 or actionStates[3] == 1) and previousY == playerData["y"]:
-                    punishY += 1
-                    if punishY > 2:
-                        reward -= .01
-                else:
-                    punishY = 0
-
-                if actionStates[8] == 1 and playerData["bombs"] == 0 and playerData["golden_bomb"] == 0:
-                    reward -= .01
-                if actionStates[9] == 1 and playerData["full_charge1"] == 0:
-                    reward -= .01
-                if actionStates[10] == 1 and playerData["card"] == 0 and playerData["pill"] == 0:
-                    reward -= .01
-                if actionStates[11] == 1 and playerData["trinket1"] == 0:
-                    reward -= .01
-
-                targets = []
-                for y in range(roomY):
-                    for x in range(roomX):
-                        tile = roomGrid[y][x]
-                        if tile[0] == 16 and tile[2] == 2 and len(current_rooms) > 0:  # Door and open
-                            door_x = (x + 1) * 40  # Position inside the room
-                            door_y = (y + 3) * 40
-                            if (x, y) in door_mappings:
-                                target_room = door_mappings[(x, y)](current_rooms)
-                            else:
-                                print("Door not listed", x, y)
-                            cleared_status = floorGrid_normalized[target_room[1], target_room[0], 4]
-                            if target_room:
-                                targets.append([(x, y), cleared_status, (door_x, door_y), target_room])
-                closer_to_any_door = False
-                for target in targets:
-                    (xtile, ytile), cleared_status, (door_x, door_y), target_room = target
-                    key = (xtile, ytile, target_room[0], target_room[1])
-                    targetRoomType = floorGrid_normalized[target_room[1], target_room[0], 2]
-                    targetMultiplier = 2 if targetRoomType == 0.13333334 else 1
-                    distance = ((agent_x - door_x) ** 2 + (agent_y - door_y) ** 2) ** 0.5  # Distance in units
-
-                    if key not in door_min_distances:
-                        door_min_distances[key] = distance  # Initialize with current distance
-
-                    # Reward for getting closer
-                    distance_covered = door_min_distances[key] - distance
-                    if distance_covered > 0:
-                        closer_to_any_door = True
-                        # Normalize by 200 units (5 tiles), cap at 1.0
-                        reward_increment = min(1.0, distance_covered / 200) * (0.2 if cleared_status == 0 else 0.02)
-                        reward += reward_increment * targetMultiplier
-
-                    """elif closer_to_any_door == False and distance_covered < 0 and cleared_status == 0:
-                        punishment = -0.001 * min(1.0, (distance - door_min_distances[key]) / 200)
-                        reward += punishment * targetMultiplier"""
-                    if distance < door_min_distances[key]:
-                        door_min_distances[key] = distance
-
-                visited_rooms = sum(1 for y in range(floorGrid_normalized.shape[0]) for x in range(floorGrid_normalized.shape[1]) if floorGrid_normalized[y, x][3] == 1)
-                if visited_rooms > 1 and visited_rooms > last_visited_rooms:
-                    roomHP = totalHP
-                    reward += .2
-                    resetTimer += 250
-                if lastRoom != room:
-                    reward += .05
-                if playerData["alive_enemies"] > 0 and totalHP >= roomHP:
-                    reward += .01
-                    resetTimer += .5
-
-                if currentFloor != playerData["stage"]:
+                    roomGridSection = totalRoomGrid[target_y:target_y+16, target_x:target_x+28, :]
                     playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
-                    if currentFloor != playerData["stage"]:
-                        print(f"{isaacNumber}. Floor changed...")
-                        door_min_distances = {}
-                        totalRoomGrid = np.zeros((105, 183, 13), dtype=np.float32)
-                        totalRoomGrid[:, :, :3] = -0.2
-                        reward += .5
+                    agent_x = playerData["x"]*playerNormalization["x"]
+                    agent_y = playerData["y"]*playerNormalization["y"]
+                    playerGrid = playerHeatmap(agent_x, agent_y)
+                    roomGridSection[:, :, 3] = playerGrid
+                    targetGrid = playerHeatmap(agent_target_x, agent_target_y)
+                    roomGridSection[:, :, 4] = targetGrid
+                    roomGridSectionF = np.transpose(roomGridSection, (2, 0, 1))  #(14,16,28)
 
-                reward *= 100
-                total_reward += reward
+                    itemArray = np.zeros(50, dtype=np.float32)
+                    if len(playerData["items"]) > 0:
+                        normalized_values = [value / 800 for value in playerData["items"]]
+                        itemArray[:len(normalized_values)] = normalized_values
+                    additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32),np.array(dataValues, dtype=np.float32),itemArray, entitiesListFull.flatten()])
+
+                    # 0 to 2 are the tile id, collision and state. 3 is player heatmap. 4 to 12 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laaser,effect,slot+beggar.
+                    final_state = emptyFinalState.copy_(torch.from_numpy(roomGridSectionF).unsqueeze(0))
+                    floorGrid_tensor = emptyFloorTensor.copy_(torch.from_numpy(floorGrid_resized).unsqueeze(0))
+                    additional_values_tensor = emptyAdditionalValues.copy_(torch.from_numpy(additional_values).unsqueeze(0))
+
+                    #Rewards
+                    with open(f"F:/IsaacEnemyDamage{isaacNumber}.txt", "r") as file:
+                        currentEnemyDamage = float(file.read())
+
+                    damageDifference = currentEnemyDamage - lastEnemyDamage
+
+                    itemsSum = len(playerData["items"])
+                    pickups = playerData["bombs"] + playerData["coins"] + playerData["keys"]
+
+                    reward = (itemsSum - previousItemsSum)*10 + (totalHP - previousHP)*10 + (damageDifference / 10)
+                    reward = 0
+
+                    if pickups > previousPickups:
+                        reward += 2 * pickups  # Scaled: 0.1 * 100 = 10
+                        previousPickups = pickups
+
+                    if lastRoom != room:
+                        reward += 5
+                        room_visits[room] = room_visits.get(room, 0) + 1
+                        lastRoom = room
+
+                    """if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
+                        punishX += 1
+                        if punishX > 2:
+                            reward -= 1  # Scaled: -0.01 * 100 = -1
+                    else:
+                        punishX = 0
+                    if (actionStates[2] == 1 or actionStates[3] == 1) and previousY == playerData["y"]:
+                        punishY += 1
+                        if punishY > 2:
+                            reward -= 1  # Scaled: -0.01 * 100 = -1
+                    else:
+                        punishY = 0
+
+                    if actionStates[8] == 1 and playerData["bombs"] == 0 and playerData["golden_bomb"] == 0:
+                        reward -= 1  # Scaled: -0.01 * 100 = -1
+                    if actionStates[9] == 1 and playerData["full_charge1"] == 0:
+                        reward -= 1  # Scaled: -0.01 * 100 = -1
+                    if actionStates[10] == 1 and playerData["card"] == 0 and playerData["pill"] == 0:
+                        reward -= 1  # Scaled: -0.01 * 100 = -1
+                    if actionStates[11] == 1 and playerData["trinket1"] == 0:
+                        reward -= 1  # Scaled: -0.01 * 100 = -1"""
+
+                    action_x = action % 28
+                    action_y = action // 28
+                    targets = []
+
+                    for entity in entitiesList:
+                        if entity[0] == 3:
+                            target_room = current_rooms[0][2]
+                            cleared_status = int(floorGrid[target_room[1], target_room[0], 4])
+                            targetRoomType = 1  # Default type
+                            x = (entity[2] / 40) - 1
+                            y = (entity[3] / 40) - 3
+                            targets.append([(x, y), cleared_status, [target_room % 13, target_room // 13], targetRoomType, target_room])
+
+                    for y in range(roomY):
+                        for x in range(roomX):
+                            tile = roomGrid[y][x]
+                            if tile[0] == 16 and tile[2] == 2:  # Door and open
+                                if (x, y) in door_mappings:
+                                    target_room = door_mappings[(x, y)](current_rooms)
+                                else:
+                                    print("Door not listed", x, y)
+                                    continue
+                                cleared_status = int(floorGrid[target_room[1], target_room[0], 4])
+                                targetRoomType = int(floorGrid[target_room[1], target_room[0], 2])
+                                if target_room:
+                                    targets.append([(x, y), cleared_status, target_room, targetRoomType, current_rooms[0][2]])
+                            elif tile[0] in [17, 23, 20]:  # Non-door targets
+                                target_room = current_rooms[0][2]
+                                cleared_status = tile[3] if len(tile) > 3 else 0
+                                targetRoomType = 1  # Default type
+                                targets.append([(x, y), cleared_status, [target_room % 13, target_room // 13], targetRoomType, target_room])
+
+                    # Process targets and scale base rewards
+                    for target in targets:
+                        (xtile, ytile), cleared_status, target_target_room, targetRoomType, target_current_room = target
+                        target_target_room_idx = target_target_room[1] * 13 + target_target_room[0]
+                        key = (target_current_room, xtile, ytile, target_target_room_idx)
+                        if targetRoomType == 2:  # shop
+                            base_reward = 1.5
+                        elif targetRoomType == 3:  # error
+                            base_reward = 1.5
+                        elif targetRoomType == 4:  # treasure (or items)
+                            base_reward = 2
+                        elif targetRoomType == 5:  # boss (or enemies)
+                            base_reward = 1.9
+                        elif targetRoomType == 14:  # sac room
+                            base_reward = .5
+                        elif targetRoomType == 15:  # angel
+                            base_reward = 2
+                        else:
+                            base_reward = 1
+
+                        if cleared_status == 1:  # Cleared
+                            base_reward = 0
+
+                        target_total_reward = base_reward
+                        for existing_key in target_potential_reward:
+                            if existing_key[0] == target_target_room_idx:
+                                if len(existing_key) >= 4 and existing_key[3] == target_current_room:
+                                    continue
+                                target_total_reward += target_potential_reward[existing_key] * 0.9
+                        visit_count = room_visits.get(target_target_room_idx, 0)
+                        decay_factor = max(0.2, 1.0 - 0.2 * (visit_count - 1))
+
+                        target_potential_reward[key] = target_total_reward * decay_factor
+
+                    # Reward calculation for actions
+                    if action_x < roomX and action_y < roomY:
+                        target_tile = roomGrid[action_y][action_x]
+                        tile_collision = target_tile[1]
+
+                        # Find the highest reward for the current room
+                        max_reward = float('-inf')
+                        for key in target_potential_reward:
+                            current_room, xtile, ytile, target_room_idx = key
+                            if current_room == room:
+                                max_reward = max(max_reward, target_potential_reward[key])
+
+                        # Only reward if the action matches a target with the highest reward
+                        for key in target_potential_reward:
+                            current_room, xtile, ytile, target_room_idx = key
+                            if xtile == action_x and ytile == action_y and current_room == room:
+                                if target_potential_reward[key] == max_reward:  # Only reward if it's the highest
+                                    reward += target_potential_reward[key] * 1  # Scaled: 0.01 * 100 = 1
+                                break
+                        else:  # No matching target found
+                            if tile_collision == 4 or tile_collision == 2 or tile_collision == 1:  # Wall, solid, or pit
+                                reward -= 0.01
+                            elif tile_collision == 0:  # No collision (walkable floor)
+                                reward += 0.01
+                    else:  # Target outside room grid
+                        reward -= 0.01
+
+                    visited_rooms = sum(1 for y in range(13) for x in range(13) if floorGrid[y, x][3] == 1)
+                    if visited_rooms > 1 and visited_rooms > last_visited_rooms:
+                        roomHP = totalHP
+                        reward += 10
+                        resetTimer += 250
+                        last_visited_rooms = visited_rooms
+                    """if playerData["alive_enemies"] > 0 and totalHP >= roomHP:
+                        reward += 1
+                        resetTimer += 0.5"""
+
+                    if currentFloor != playerData["stage"]:
+                        playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
+                        if currentFloor != playerData["stage"]:
+                            print(f"{isaacNumber}. Floor changed...")
+                            target_potential_reward = {}
+                            totalRoomGrid = np.zeros((105, 183, roomChannels), dtype=np.float32)
+                            totalRoomGrid[:, :, :3] = -0.2
+                            reward += 50
+
+                    total_reward += reward
 
                 if not manualTesting:
                     # Done conditions
@@ -812,7 +889,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         emptyFloorTensor.zero_()
                         emptyAdditionalValues.zero_()
                         #print(f"{isaacNumber}. Main loop step counter: {step_count}, Episode {agent.episode_counter}, Total Reward: {total_reward}, Per step: {(total_reward/step_count):.2f}")
-                        #freedom = True if total_reward > 0 else False
+                        freedom = True
                         total_reward = 0
                         episodeSteps += step_count
 
@@ -824,7 +901,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 currentFloor = playerData["stage"]
                 previousX = playerData["x"]
                 previousY = playerData["y"]
-                previousHP, previousItemsSum, previousEnemyHP, previousPickups, lastRoom, last_visited_rooms, lastEnemyDamage = totalHP, itemsSum, totalEnemyHP, pickups, room, visited_rooms, currentEnemyDamage
+                previousHP, previousItemsSum, previousEnemyHP, lastEnemyDamage = totalHP, itemsSum, totalEnemyHP, currentEnemyDamage
 
                 if done and len(states) > (agent.n_steps - resetTimer):
                     total_reward_sum = sum(rewards)  # Total reward for the episode
@@ -849,47 +926,81 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     if not manualLearning and not manualTesting:
                         reward_per_step = total_reward_sum / episodeSteps
                         episodeSteps = 0
-                        savesLimit = 3
+                        savesLimit = 3  # Total number of models to keep
+                        n_next_best = 1  # Number of next-best models to keep (adjustable, savesLimit - 2 at most)
                         model_dir = "F:/"
                         model_path = f"F:/isaacPPOModelIsaac{isaacNumber}RPS{reward_per_step:.4f}EP{agent.episode_counter}.pth"
 
-                        own_files = []
-                        all_files = []
+                        own_files = []  # (path, rps, ep)
+                        all_files = []  # (path, rps, isaac_num, ep)
                         for filename in listdir(model_dir):
                             if filename.startswith("isaacPPOModelIsaac") and filename.endswith(".pth"):
                                 try:
                                     start_isaac = filename.index("Isaac") + 5
                                     start_rps = filename.index("RPS") + 3
                                     start_ep = filename.index("EP")
+                                    end_ep = filename.rindex(".pth")
                                     file_isaac_num = int(filename[start_isaac:start_rps-3])
                                     file_rps = float(filename[start_rps:start_ep])
+                                    file_ep = int(filename[start_ep + 2:end_ep])
                                     full_path = path.join(model_dir, filename)
                                     if file_isaac_num == isaacNumber:
-                                        own_files.append((full_path, file_rps))
-                                    all_files.append((full_path, file_rps, file_isaac_num))
+                                        own_files.append((full_path, file_rps, file_ep))
+                                    all_files.append((full_path, file_rps, file_isaac_num, file_ep))
                                 except (ValueError, IndexError) as e:
                                     print(f"Skipping invalid filename {filename}: {e}")
                                     continue
 
+                        # Sort own_files by episode (latest) and reward (highest)
+                        own_files.sort(key=lambda x: (x[2], x[1]), reverse=True)  # Latest episode first, then highest rps
+                        if own_files:
+                            highest_rps_file = max(own_files, key=lambda x: x[1])  # Highest reward per step
+                            latest_file = own_files[0]  # Latest by episode number
+
+                        # Decide whether to save the new model
+                        should_save = True
+                        files_to_keep = []
                         if len(own_files) >= savesLimit:
-                            lowest_file, lowest_rps = min(own_files, key=lambda x: x[1])
-                            if reward_per_step > lowest_rps:
-                                remove(lowest_file)
-                                print(f"Removed {lowest_file} with reward/step {lowest_rps:.4f}")
+                            # Define priority: highest, latest, then n next best
+                            files_to_keep = [highest_rps_file]
+                            if latest_file[0] != highest_rps_file[0]:  # Add latest if not same as highest
+                                files_to_keep.append(latest_file)
+
+                            # Get remaining slots for next best
+                            remaining_slots = savesLimit - len(files_to_keep)
+                            n_next_best = min(n_next_best, remaining_slots)  # Adjust n if too large
+                            other_files = [f for f in own_files if f[0] not in [highest_rps_file[0], latest_file[0]]]
+                            other_files.sort(key=lambda x: x[1], reverse=True)  # Sort by reward descending
+                            files_to_keep.extend(other_files[:n_next_best])  # Add n next best
+
+                            # Check if new reward beats the lowest of the keepers
+                            lowest_keeper = min(files_to_keep, key=lambda x: x[1])
+                            if reward_per_step <= lowest_keeper[1] and len(own_files) >= savesLimit:
+                                print(f"New reward/step {reward_per_step:.4f} not better than lowest keeper {lowest_keeper[1]:.4f}, skipping save")
+                                should_save = False
                             else:
-                                print(f"New reward/step {reward_per_step:.4f} not better than lowest {lowest_rps:.4f}, skipping save")
-                                model_path = None
+                                # Remove the lowest non-keeper if we’re over the limit
+                                current_files_set = set(f[0] for f in own_files)
+                                keepers_set = set(f[0] for f in files_to_keep)
+                                if len(own_files) >= savesLimit:
+                                    to_remove = min([f for f in own_files if f[0] not in keepers_set], key=lambda x: x[1], default=None)
+                                    if to_remove:
+                                        remove(to_remove[0])
+                                        print(f"Removed {to_remove[0]} with reward/step {to_remove[1]:.4f}")
 
-                        if model_path:
-                            agent.save(model_path)  # Uses your save method
+                        if should_save:
+                            agent.save(model_path)
+                            print(f"Saved new model at {model_path} with reward/step {reward_per_step:.4f}")
+                            own_files.append((model_path, reward_per_step, agent.episode_counter))
 
-                        if len(own_files) >= savesLimit and agent.episode_counter % 10 == 0:
+                        # Blending logic (every 25 episodes)
+                        if len(own_files) >= savesLimit and agent.episode_counter % 25 == 0:
                             current_reward_per_step = reward_per_step
-                            best_model_path = model_path if model_path else own_files[-1][0]
+                            best_model_path = max(own_files, key=lambda x: x[1])[0]  # Default to own best
                             best_reward_per_step = current_reward_per_step
                             best_instance_id = isaacNumber
 
-                            for file_path, file_rps, file_isaac_num in all_files:
+                            for file_path, file_rps, file_isaac_num, _ in all_files:
                                 if file_rps > best_reward_per_step:
                                     best_reward_per_step = file_rps
                                     best_model_path = file_path
@@ -897,12 +1008,10 @@ def run_instance(isaacNumber, control_dict, learn_lock):
 
                             if best_reward_per_step > current_reward_per_step:
                                 try:
-                                    # Load the checkpoint and extract policy state dict
                                     checkpoint = torch.load(best_model_path, map_location=agent.device)
                                     best_state_dict = checkpoint['policy_state_dict']
                                     current_state_dict = agent.policy.state_dict()
 
-                                    # Check for key mismatches
                                     best_keys = set(best_state_dict.keys())
                                     current_keys = set(current_state_dict.keys())
                                     common_keys = best_keys.intersection(current_keys)
@@ -918,40 +1027,25 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                                         if not common_keys:
                                             raise ValueError("No common parameters to blend; models are incompatible")
 
-                                    # Calculate blending weight
                                     reward_diff = best_reward_per_step - current_reward_per_step
                                     alpha = min(0.9, reward_diff / (reward_diff + 0.1))
 
-                                    # Get state dicts
-                                    current_state_dict = agent.policy.state_dict()
-                                    best_state_dict = checkpoint['policy_state_dict']
-                                    common_keys = [key for key in current_state_dict.keys() if key in best_state_dict]
-
-                                    # Define critic-specific parameters to skip blending
-                                    critic_params = ['critic.weight', 'critic.bias']
-
-                                    # Blend only non-critic parameters, keep critic parameters from current model
                                     new_state_dict = {}
+                                    critic_params = ['critic.weight', 'critic.bias']
                                     for key in common_keys:
                                         if key in critic_params:
-                                            # Keep the current critic parameters unchanged
                                             new_state_dict[key] = current_state_dict[key]
                                         else:
-                                            # Blend shared and actor parameters
                                             new_state_dict[key] = (1 - alpha) * current_state_dict[key] + alpha * best_state_dict[key]
-
-                                    # Add any remaining parameters from current_state_dict that weren't in common_keys
                                     for key in current_state_dict.keys():
                                         if key not in new_state_dict:
                                             new_state_dict[key] = current_state_dict[key]
 
-                                    # Load the blended policy state dict
                                     agent.policy.load_state_dict(new_state_dict)
                                     print(f"Isaac {isaacNumber} blended model with {best_model_path} "
                                           f"(Reward/Step: {best_reward_per_step:.4f}, Weight: {alpha:.2f}), "
                                           f"critic parameters unchanged from current model")
 
-                                    # Update optimizer and counters
                                     agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                                     agent.step_counter = max(agent.step_counter, checkpoint['step_counter'])
                                     agent.episode_counter = max(agent.episode_counter, checkpoint['episode_counter'])
