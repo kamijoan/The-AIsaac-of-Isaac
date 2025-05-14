@@ -10,15 +10,32 @@ local enemyHPBefore = {}  -- Store previous HP of enemies
 
 local sprite = Sprite()
 local hasReset = false  -- Track if the game was reset
-local totalDamageDealt = 0
-local enemyHPBefore = {}
 local instanceNumber = 0       -- Current active instance number
 local pendingNumber = 1        -- Pending instance number (not applied yet)
 local pendingChanges = false   -- Whether there are pending changes to apply
 
+-- Flag to enable/disable enemy removal (NoEnemies functionality)
+local removeEnemies = false -- Set to true to enable enemy removal
+
 -- ====================== PATHFINDING VARIABLES ======================
 local targetPosition = nil
-local lastTargetPosition = nil
+
+local function IsTileSolidForPlayer(gridEntity, player)
+    if not gridEntity then
+        return false -- No entity means the tile is passable
+    end
+    local collisionClass = gridEntity.CollisionClass
+    if collisionClass == GridCollisionClass.COLLISION_WALL then
+        return true -- Walls are always solid
+    end
+    if not player.CanFly then
+        if collisionClass == GridCollisionClass.COLLISION_SOLID or
+           collisionClass == GridCollisionClass.COLLISION_PIT then
+            return true -- Solids and pits are solid when not flying
+        end
+    end
+    return false -- All other cases (including solids/pits when flying) are passable
+end
 
 -- ====================== FILE PATHS ======================
 local function GetFilePaths()
@@ -50,13 +67,16 @@ end
 -- ====================== PATHFIND ======================
 local waypoints = {}  -- Persistent waypoints
 
+function table.contains(tbl, value)
+    for _, v in ipairs(tbl) do
+        if v == value then return true end
+    end
+    return false
+end
+
 local function HandlePathfinding()
     if not targetPosition then
         waypoints = {}
-        inputs[ButtonAction.ACTION_LEFT] = 0
-        inputs[ButtonAction.ACTION_RIGHT] = 0
-        inputs[ButtonAction.ACTION_UP] = 0
-        inputs[ButtonAction.ACTION_DOWN] = 0
         return
     end
 
@@ -80,11 +100,7 @@ local function HandlePathfinding()
         return
     end
     local targetEntity = room:GetGridEntity(targetGridIndex)
-    if targetEntity and (
-        targetEntity.CollisionClass == GridCollisionClass.COLLISION_PIT or
-        targetEntity.CollisionClass == GridCollisionClass.COLLISION_SOLID or
-        targetEntity.CollisionClass == GridCollisionClass.COLLISION_WALL
-    ) then
+    if IsTileSolidForPlayer(targetEntity, player) then
         waypoints = {}
         inputs[ButtonAction.ACTION_LEFT] = 0
         inputs[ButtonAction.ACTION_RIGHT] = 0
@@ -147,11 +163,7 @@ local function HandlePathfinding()
             for _, neighbor in ipairs(neighbors) do
                 if neighbor >= 0 and neighbor < gridSize and not closedSet[neighbor] then
                     local gridEntity = room:GetGridEntity(neighbor)
-                    if not gridEntity or (
-                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_NONE or
-                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_OBJECT or
-                        gridEntity.CollisionClass == GridCollisionClass.COLLISION_WALL_EXCEPT_PLAYER
-                    ) then
+                    if not IsTileSolidForPlayer(gridEntity, player) then
                         local isDiagonal = (neighbor == currentIndex + 1 + gridWidth or
                                            neighbor == currentIndex - 1 + gridWidth or
                                            neighbor == currentIndex + 1 - gridWidth or
@@ -174,7 +186,7 @@ local function HandlePathfinding()
         end
 
         if #waypoints == 0 then
-            table.insert(waypoints, targetPosition)
+            waypoints = {} -- Avoid direct movement to invalid target
         end
     end
 
@@ -201,13 +213,6 @@ local function HandlePathfinding()
         inputs[ButtonAction.ACTION_UP] = 0
         inputs[ButtonAction.ACTION_DOWN] = 0
     end
-end
-
-function table.contains(tbl, value)
-    for _, v in ipairs(tbl) do
-        if v == value then return true end
-    end
-    return false
 end
 -- ====================== SPRITES SETUP ======================
 -- Sprite filenames
@@ -239,9 +244,6 @@ local ignoredTypes = {
     [GridEntityType.GRID_DECORATION] = true,
     -- Add more as needed
 }
-
--- Flag to enable/disable enemy removal (NoEnemies functionality)
-local removeEnemies = true -- Set to true to enable enemy removal
 
 -- ====================== HELPER FUNCTIONS ======================
 local function ClearFiles()
@@ -319,8 +321,13 @@ local function ReadInputsFromFile()
         x, y = tonumber(x), tonumber(y)
         local room = game:GetRoom()
         targetPosition = Vector(x, y)
-    else
-        print("Failed to parse target position from: " .. data)
+    end
+
+    -- Always parse action-value pairs
+    for action, value in string.gmatch(data, "(%d+) (%d+)") do
+        action = tonumber(action)
+        value = tonumber(value)
+        inputs[action] = value
     end
 
     -- Store new input but don’t write response yet
@@ -352,6 +359,7 @@ local function LogRoomTiles()
     local roomIndex = level:GetCurrentRoomIndex()
     local roomX = room:GetGridWidth()
     local roomY = room:GetGridHeight()
+    local player = Isaac.GetPlayer(0)
 
     local tileData = {}
 
@@ -362,22 +370,22 @@ local function LogRoomTiles()
         local gridEntity = room:GetGridEntity(i)
 
         local tileType = 0  -- Default for empty spaces
-        local collisionClass = 0
         local state = 0
 
         if gridEntity then
             local entityType = gridEntity:GetType()
-
             -- If entity type is in the ignore list, set values to 0
             if not ignoredTypes[entityType] then
                 tileType = entityType
-                collisionClass = gridEntity.CollisionClass
                 state = gridEntity.State
             end
         end
 
-        -- Convert to string for comparison
-        local tileString = string.format("%d, %d, %d", tileType, collisionClass, state)
+        -- Determine passability (0 or 1) based on player movement
+        local passability = IsTileSolidForPlayer(gridEntity, player) and 1 or 0
+
+        -- Write tileType, passability, state
+        local tileString = string.format("%d,%d,%d", tileType, passability, state)
         table.insert(tileData, tileString)
     end
 
@@ -507,116 +515,110 @@ end
 -- ====================== FEATURE: ENTITY SCANNING ======================
 local function ScanEntities()
     local paths = GetFilePaths()
-    local room = game:GetRoom()
     local entities = {}
 
     for _, entity in pairs(Isaac.GetRoomEntities()) do
-        local entityType = entity.Type
+        local type = entity.Type
         local x, y = entity.Position.X, entity.Position.Y
         local vx, vy = entity.Velocity.X, entity.Velocity.Y
-        local flags = entity:GetEntityFlags() or 0
+        local flags = entity:GetEntityFlags()
 
-        local isPlayer = entity:ToPlayer() ~= nil
-        local isFamiliar = entity:ToFamiliar() ~= nil
+        -- Split velocities into positive and negative components
+        local vxneg = vx < 0 and -vx or 0
+        local vx_pos = vx >= 0 and vx or 0
+        local vyneg = vy < 0 and -vy or 0
+        local vy_pos = vy >= 0 and vy or 0
 
-        if not isPlayer and not isFamiliar then
-            local npc = entity:ToNPC()
-            if npc then
-                local hp = npc.HitPoints
-                local isInvincible = npc:IsInvincible() and 1 or 0
-                local collisionDamage = npc.CollisionDamage
-                local size = npc.Size
-                table.insert(entities, string.format("1,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%.2f,%d",
-                    entityType, x, y, vx, vy, hp, isInvincible, collisionDamage, size, flags))
-
-            elseif entity.Type == EntityType.ENTITY_EFFECT then
-                local effect = entity:ToEffect()
-                local variant = effect.Variant
-                local scale = effect.Scale
-                local timeout = effect.Timeout
-                table.insert(entities, string.format("8,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,0,%d",
-                    entityType, x, y, vx, vy, scale, timeout, variant, flags))
-
-            elseif entity.Type == EntityType.ENTITY_BOMB then
-                local bomb = entity:ToBomb()
-                local explosionDamage = bomb.ExplosionDamage
-                local radiusMultiplier = bomb.RadiusMultiplier
-                table.insert(entities, string.format("2,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0,0,%d",
-                    entityType, x, y, vx, vy, explosionDamage, radiusMultiplier, flags))
-
-            elseif entity.Type == EntityType.ENTITY_PICKUP then
-                local pickup = entity:ToPickup()
-                local coinValue = pickup:GetCoinValue()
-                local isShopItem = pickup:IsShopItem() and 1 or 0
-                local price = pickup.Price
-                table.insert(entities, string.format("3,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%.2f,0,%d",
-                    entityType, x, y, vx, vy, coinValue, isShopItem, price, flags))
-
-            elseif entity.Type == EntityType.ENTITY_PROJECTILE then
-                local projectile = entity:ToProjectile()
-                local height = projectile.Height
-                local damage = projectile.CollisionDamage
-                local scale = projectile.SpriteScale.X
-                table.insert(entities, string.format("4,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0,%d",
-                    entityType, x, y, vx, vy, height, damage, scale, flags))
-
-            elseif entity.Type == EntityType.ENTITY_TEAR then
-                local tear = entity:ToTear()
-                local baseDamage = tear.CollisionDamage
-                local scale = tear.SpriteScale.X
-                local height = tear.Height
-                table.insert(entities, string.format("5,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0,%d",
-                    entityType, x, y, vx, vy, baseDamage, scale, height, flags))
-
-            elseif entity.Type == EntityType.ENTITY_LASER then
-                local laser = entity:ToLaser()
-                local parent = laser.Parent
-                local parentType = parent and parent.Type or -1
-                local angle = laser.Angle
-                local distance = laser.Distance
-                local damage = laser.CollisionDamage
-                local scale = laser.SpriteScale.X
-                local timeout = laser.Timeout
-                table.insert(entities, string.format("7,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
-                    entityType, x, y, vx, vy, angle, distance, damage, scale, timeout, flags))
-
-            elseif entity.Type == EntityType.ENTITY_SLOT then
-                local variant = entity.Variant
-                local hitPoints = entity.HitPoints
-                local timeout = entity.Timeout or 0
-
-                table.insert(entities, string.format("9,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0,0,%d",
-                    entityType, x, y, vx, vy, hitPoints, timeout, variant, flags))
-
-            elseif entity.Type == EntityType.ENTITY_BEGGAR then
-                local variant = entity.Variant
-                local hitPoints = entity.HitPoints
-                local timeout = entity.Timeout or 0
-
-                table.insert(entities, string.format("10,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0,0,%d",
-                    entityType, x, y, vx, vy, hitPoints, timeout, variant, flags))
+        -- Helper function to format entity data with 13 fields
+        local function formatEntity(prefix, fields)
+            -- Default to 4 additional fields (after prefix, type, x, y, vxneg, vx, vyneg, vy) filled with 0
+            local defaults = {0, 0, 0, 0}
+            for i, value in pairs(fields) do
+                defaults[i] = math.abs(value or 0)
             end
 
-        elseif entity:ToFamiliar() ~= nil or (entity.IsFriendly and entity:IsFriendly()) then
-            local familiar = entity:ToFamiliar()
-            if familiar then
-                local player = familiar.Player
-                local playerIndex = player and player.ControllerIndex or -1
-                local fireCooldown = familiar.FireCooldown
-                local canShoot = familiar.CanShoot and 1 or 0
-                local spriteScale = familiar.SpriteScale.X
-                local hp = familiar.HitPoints
-                local collisionDamage = familiar.CollisionDamage
-                local variant = familiar.Variant
-
-                table.insert(entities, string.format("6,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%.2f,%d",
-                    entityType, x, y, vx, vy, hp, canShoot, collisionDamage, spriteScale, variant, flags))
+            -- Format string with 13 fields: prefix, type, x, y, vxneg, vx, vyneg, vy, field1, field2, field3, field4, flags
+            return string.format("%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+                prefix, type, x, y, vxneg, vx_pos, vyneg, vy_pos, defaults[1], defaults[2], defaults[3], defaults[4], flags)
+        end
+        local familiar = entity:ToFamiliar()
+        if familiar ~= nil then
+            table.insert(entities, formatEntity("6", {
+                familiar.HitPoints,
+                familiar.CanShoot and 1 or 0,
+                familiar.CollisionDamage,
+                familiar.SpriteScale.X
+            }))
+        elseif not entity:ToPlayer() then
+            if type == EntityType.ENTITY_NPC then
+                local npc = entity:ToNPC()
+                table.insert(entities, formatEntity("1", {
+                    npc:IsInvincible() and 1 or 0,
+                    npc.HitPoints,
+                    npc.CollisionDamage,
+                    npc.Size
+                }))
+            elseif type == EntityType.ENTITY_EFFECT then
+                local effect = entity:ToEffect()
+                table.insert(entities, formatEntity("8", {
+                    effect.Variant,
+                    effect.Timeout,
+                    effect.DamageSource,
+                    effect.Scale
+                }))
+            elseif type == EntityType.ENTITY_BOMB then
+                local bomb = entity:ToBomb()
+                table.insert(entities, formatEntity("2", {
+                    bomb.IsFetus,
+                    0,
+                    bomb.ExplosionDamage,
+                    bomb.RadiusMultiplier
+                }))
+            elseif type == EntityType.ENTITY_PICKUP then
+                local pickup = entity:ToPickup()
+                table.insert(entities, formatEntity("3", {
+                    pickup:GetCoinValue(),
+                    pickup:IsShopItem() and 1 or 0,
+                    pickup.Price,
+                    pickup.OptionsPickupIndex
+                }))
+            elseif type == EntityType.ENTITY_PROJECTILE then
+                local projectile = entity:ToProjectile()
+                table.insert(entities, formatEntity("4", {
+                    projectile.HomingStrength,
+                    projectile.Height,
+                    projectile.CollisionDamage,
+                    projectile.SpriteScale.X
+                }))
+            elseif type == EntityType.ENTITY_TEAR then
+                local tear = entity:ToTear()
+                table.insert(entities, formatEntity("5", {
+                    tear.BaseDamage,
+                    tear.Height,
+                    tear.CollisionDamage,
+                    tear.SpriteScale.X
+                }))
+            elseif type == EntityType.ENTITY_LASER then
+                local laser = entity:ToLaser()
+                table.insert(entities, formatEntity("7", {
+                    laser.Angle,
+                    laser.Distance,
+                    laser.CollisionDamage,
+                    laser.SpriteScale.X
+                }))
+            elseif type == EntityType.ENTITY_SLOT or type == EntityType.ENTITY_BEGGAR then
+                local prefix = type == EntityType.ENTITY_SLOT and "9" or "10"
+                table.insert(entities, formatEntity(prefix, {
+                    entity.Variant,
+                    entity.HitPoints,
+                    entity.Timeout,
+                    0
+                }))
             end
         end
     end
-    WriteFile(paths.entityData, table.concat(entities, "|"))
+    WriteFile(paths.entityData, table.concat(entities, "\n"))
 end
-
 -- ====================== CALLBACKS ======================
 mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity, amount, damageFlags, damageSource) --track damage to enemies
     if entity:IsVulnerableEnemy() then
@@ -633,10 +635,6 @@ mod:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, entity, amount, dam
         enemyHPBefore[id] = entity.HitPoints
     end
 end)
-
-local function WriteDamageToFile()
-    WriteFile(GetFilePaths().damageData, tostring(totalDamageDealt))
-end
 
 -- For game start/reset
 mod:AddCallback(ModCallbacks.MC_POST_GAME_STARTED, function(_, isContinued)
