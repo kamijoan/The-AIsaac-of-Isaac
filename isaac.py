@@ -51,14 +51,22 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     except:
                         playerData["items"] = []
                 elif key in playerNormalization:
-                    playerData[key] = float(value) / playerNormalization[key]
-                    if playerData[key] > 1 or playerData[key] < -1:
-                        print("Normalized Stat problem:",key,playerData[key])
+                    norm_value = float(value) / playerNormalization[key]
+                    if key == "vx":
+                        playerData["vxneg"] = max(0.0, -norm_value)
+                        playerData["vx"] = max(0.0, norm_value)
+                    elif key == "vy":
+                        playerData["vyneg"] = max(0.0, -norm_value)
+                        playerData["vy"] = max(0.0, norm_value)
+                    else:
+                        playerData[key] = norm_value
+                        if playerData[key] > 1 or playerData[key] < 0:
+                            print("Normalized Stat problem:",key,playerData[key])
                 elif key in playerData:
                     playerData[key] = int(value)
 
         totalHP = playerData["hp"]+playerData["soul_hp"]+playerData["black_hp"]+playerData["rotten_hp"]+playerData["bone_hp"]+playerData["eternal_hp"]+playerData["extra_lives"]
-        dataValues = [v for k, v in playerData.items() if isinstance(v, (float))] #ignores item list and timer int
+        dataValues = np.array([v for v in playerData.values() if isinstance(v, float)], dtype=np.float32) #ignores item list and timer int
         return playerData, totalHP, dataValues
 
     def playerHeatmap(player_x, player_y, sigma=.2):
@@ -77,43 +85,34 @@ def run_instance(isaacNumber, control_dict, learn_lock):
 
         return heatmap, int(grid_x), int(grid_y)
 
-    def entityHeatmaps(entitiesList, numMaps=10):
+    def entityHeatmaps(entityData, numMaps=10):
         heatmaps = {i: np.zeros((16, 28), dtype=np.float32) for i in range(1, numMaps)}  # 9 heatmaps for types 1-9
 
         # Define sigma values per entity type
         sigma_values = {1:.2, 2:.2, 3:.2, 4:.2, 5:.2, 6:.2, 7:.2, 8:.2, 9:.2, 10:.2}
 
-        # Generate meshgrid for Gaussian calculations
-        x = np.linspace(0, 27, 28)  # Grid width
-        y = np.linspace(0, 15, 16)  # Grid height
+        x = np.linspace(0, 27, 28)
+        y = np.linspace(0, 15, 16)
         X, Y = np.meshgrid(x, y)
-
-        for entity in entitiesList:
-            entity_type, _, xpos, ypos, *_ = entity  # Extract type and position
-
-            # Denormalize values
-            entity_type = int(entity_type * 10)  # Convert back to 1-9
-            entity_type = 9 if entity_type == 10 else entity_type  # Convert type 10 to 9
-
-            xpos *= entitiesNormalization[2]
-            ypos *= entitiesNormalization[3]
+        for entity in entityData:
+            entity_type, _, xpos, ypos, *_ = entity
+            entity_type = int(entity_type)
+            entity_type = 9 if entity_type == 10 else entity_type
 
             if entity_type not in heatmaps:
                 print("Entity heatmap problem:", entity_type, entity)
-                continue  # Ignore types outside 1-9 range
+                continue
 
-            # Normalize position to grid space (float for subpixel precision)
+            # Convert world coordinates to grid space
             norm_x = (xpos - room_x_min) / room_width
             norm_y = (ypos - room_y_min) / room_height
-            grid_x = norm_x * 27  # Scale to 0-27
-            grid_y = norm_y * 15  # Scale to 0-15
+            grid_x = norm_x * 27
+            grid_y = norm_y * 15
 
-            # Get entity-specific sigma
+            # Get sigma and apply Gaussian
             sigma = sigma_values[entity_type]
-
-            # Compute Gaussian at this entity's position
             entity_gaussian = np.exp(-(((X - grid_x) ** 2) / (2 * sigma ** 2) + ((Y - grid_y) ** 2) / (2 * sigma ** 2)))
-            entity_gaussian = entity_gaussian / entity_gaussian.max()
+            entity_gaussian /= entity_gaussian.max()
             entity_gaussian[entity_gaussian < 0.01] = 0
 
             heatmaps[entity_type] += entity_gaussian
@@ -129,8 +128,6 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0]
         return tuple(int(c) for c in bgr_color)  # Convert to (B, G, R)
 
-    roomChannelsToDraw = [2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-
     def drawOverlay():
         visualDataIndex = channelIndex = timer = 0
         tile_size = 4
@@ -139,25 +136,13 @@ def run_instance(isaacNumber, control_dict, learn_lock):
             sleep(1/30)
             overlay = np.zeros((500, 250, 3), dtype=np.uint8)
             try:
+                roomChannelsToDraw = [2] + [5, 6, 7, 8, 9, 10, 11, 12, 13, 14][:useHeatmaps] if useHeatmaps > 0 else [2]
                 non_zero_mask = np.any(roomGridSection[:, :, roomChannelsToDraw] > 0, axis=2)
                 y_indices, x_indices = np.where(non_zero_mask)
                 top_left_coords = [((x * tile_size) + 2, (y * tile_size) + 10) for y, x in zip(y_indices, x_indices)]
                 bottom_right_coords = [(((x + 1) * tile_size) + 2, ((y + 1) * tile_size) + 10) for y, x in zip(y_indices, x_indices)]
                 for idx, (y, x) in enumerate(zip(y_indices, x_indices)):
                     tile = roomGridSection[y, x]
-                    overlayTiles = [
-                        (2, int(tile[2] * 180), 0.5 * tile[3] + 0.5 * tile[4]),  # Grid entity (tile_id, collision, state)
-                        (5, 120, tile[5]),  # Player heatmap (green)
-                        (6, 0, tile[6]),    # Enemy (red)
-                        (7, 30, tile[7]),   # Bomb (orange)
-                        (8, 60, tile[8]),   # Pickup (yellow)
-                        (9, 180, tile[9]),  # Enemy projectile (cyan)
-                        (10, 240, tile[10]),  # Ally tear (blue)
-                        (11, 270, tile[11]),  # Familiar (purple)
-                        (12, 300, tile[12]),# Laser (magenta)
-                        (13, 90, tile[13]), # Effect (light green)
-                        (14, 150, tile[14]) # Slot + Beggar (teal)
-                    ]
                     top_left = top_left_coords[idx]
                     bottom_right = bottom_right_coords[idx]
 
@@ -168,12 +153,24 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         color = hsv_to_bgr(int(tile[2] * 180), 200, brightness)
                         cv2.rectangle(overlay, top_left, bottom_right, color, -1)
 
-                    # Handle other channels
-                    for index, hue, _ in overlayTiles[1:]:  # Skip grid entity
-                        if tile[index] > 0:
-                            brightness = int(min(50 + 160 * tile[index], 255))
-                            color = hsv_to_bgr(hue, 200, brightness)
-                            cv2.rectangle(overlay, top_left, bottom_right, color, -1)
+                    if useHeatmaps > 0:
+                        overlayTiles = [
+                            (5, 120, tile[5]),  # Player heatmap (green)
+                            (6, 0, tile[6]),    # Enemy (red)
+                            (7, 30, tile[7]),   # Bomb (orange)
+                            (8, 60, tile[8]),   # Pickup (yellow)
+                            (9, 180, tile[9]),  # Enemy projectile (cyan)
+                            (10, 240, tile[10]),  # Ally tear (blue)
+                            (11, 270, tile[11]),  # Familiar (purple)
+                            (12, 300, tile[12]),# Laser (magenta)
+                            (13, 90, tile[13]), # Effect (light green)
+                            (14, 150, tile[14]) # Slot + Beggar (teal)
+                        ]
+                        for index, hue, _ in overlayTiles:  # Skip grid entity
+                            if tile[index] > 0:
+                                brightness = int(min(50 + 160 * tile[index], 255))
+                                color = hsv_to_bgr(hue, 200, brightness)
+                                cv2.rectangle(overlay, top_left, bottom_right, color, -1)
 
                 for gridIndex, room_data in floorGridDict.items():
                     if len(floorGridDict) > 1 and room_data["Type"] > 0:
@@ -198,12 +195,13 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     player_pixel_y = int(agent_y / 10)
                     cv2.circle(overlay, (int(player_pixel_x), int(player_pixel_y)), 2, (0, 255, 0), -1)
 
-                    for entity in entitiesList:
-                        hue = int(entity[1] * 180)
-                        color = hsv_to_bgr(hue, 150, 150)
-                        entity_pixel_x = int(entity[2] * entitiesNormalization[2] / 10)
-                        entity_pixel_y = int(entity[3] * entitiesNormalization[3] / 10)
-                        cv2.circle(overlay, (int(entity_pixel_x), int(entity_pixel_y)), 1, color, -1)
+                    if entityData.size > 0:
+                        for entity in entityData:
+                            hue = int(entity[1] * 180)
+                            color = hsv_to_bgr(hue, 150, 150)
+                            entity_pixel_x = int(entity[2] / 10)
+                            entity_pixel_y = int(entity[3] / 10)
+                            cv2.circle(overlay, (int(entity_pixel_x), int(entity_pixel_y)), 1, color, -1)
 
                     if len(targets) > 0:
                         for target in targets:
@@ -222,7 +220,8 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 cv2.putText(overlay, f"Total Reward: {total_reward:.2f}, Reward:", (2, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 (text_width, _), _ = cv2.getTextSize(f"Total Reward: {total_reward:.2f}, Reward:", cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)
                 cv2.putText(overlay, f"{reward:+.3f}", (2 + text_width, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, reward_color, 1)
-                cv2.putText(overlay, f"Reset in {resetTimer + 1 - step_count} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                #cv2.putText(overlay, f"Reset in {resetTimer + 1 - step_count} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                cv2.putText(overlay, f"Reset in {agent.n_steps+1 - len(states)} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 cv2.putText(overlay, f"Episode: {agent.episode_counter}", (2, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
                 probs_list_values = agent.probs.squeeze().cpu().tolist()
@@ -418,7 +417,9 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     playerNormalization = {
         "x": 1200,
         "y": 1200,
+        "vxneg": 30,
         "vx": 30,
+        "vyneg": 30,
         "vy": 30,
         "hp": 24,  # Max red hearts
         "max_hp": 24,
@@ -455,19 +456,21 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         "stage": 20
     }
 
-    entitiesNormalization = {
-        0: 10,       # Category (1 = enemy, 2 = bomb...)
-        1: 1000,     # Entity id
-        2: 1200, # X pos
-        3: 1200, # Y pos
-        4: 30,  # X vel
-        5: 30,  # Y vel
-        6: 10000,  # HP, explosion damage, coin value, etc.
-        7: 10000,   # isInvincible, radius multiplier, etc.
-        8: 10000,   # Collision damage, price, scale, etc.
-        9: 10000,   # Size, scale, etc.
-        10:100000000000000   # Flags,wtf #17592186044416
-    }
+    entitiesNormalization = np.array([
+    10,        # 0: Category
+    1000,      # 1: Entity ID
+    1200,      # 2: X pos
+    1200,      # 3: Y pos
+    30,        # 4: X vel negative
+    30,        # 5: X vel
+    30,        # 6: Y vel negative
+    30,        # 7: Y vel
+    10000,     # 8: HP, explosion dmg
+    10000,     # 9: isInvincible, etc.
+    10000,     # 10: collision dmg, etc.
+    10000,     # 11: size, scale, etc.
+    1e14       # 12: flags
+], dtype=np.float32)
 
     door_mappings = {
         (0, 4): lambda rooms: (min(t[0] for t in rooms) - 1, min(t[1] for t in rooms)),  # left x1 or left up x2
@@ -543,11 +546,12 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     keyboardKeys = list(actionStates.values()) #12 keys
     reset,done = False,True
     lenEntitiesMemory = 200
-    numEntityValues = 11
+    numEntityValues = 13
     num_additional_values = len(keyboardKeys)+len(playerNormalization)+len(itemArray)+(lenEntitiesMemory*numEntityValues)
     action_size = 8
     pathfinding = True if action_size > 100 else False
-    roomChannels = 16 if pathfinding else 15
+    useHeatmaps = 0 #0 or 10, maybe 1 for only player
+    roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
 
     stateCenteredOnPlayer = True #The overall state varies more, might help with "just the player moving" not being enough difference between states.
     stateX,stateY = 28, 16
@@ -576,8 +580,10 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     states.append((emptyFinalState.clone(), emptyFloorTensor.clone(), emptyAdditionalValues.clone()))
 
     #effect ids, still in progress, removed ones don't reach the state, allowed ones just don't get printed.
-    removedEffects = {2,3,4,5,7,11,12,13,14,15,16,17,20,21,27,33,38,43,58,59,63,64,65,66,68,79,86,99,133,146}
-    allowedEffects = {1,6,22,23,24,25,26,34,44,45,46,50,57,61,62}
+    removedEffects = [2,3,4,5,7,11,12,13,14,15,16,17,20,21,27,33,38,43,58,59,63,64,65,66,68,79,86,99,133,146]
+    removedEffects = np.array(removedEffects, dtype=float)
+    allowedEffects = [1,6,22,23,24,25,26,34,44,45,46,50,57,61,62]
+    allowedEffects = np.array(allowedEffects, dtype=float)
 
     print(f"Running Isaac {isaacNumber}...")
     try:
@@ -729,30 +735,42 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     if np.any(block_mask[0, :]) or np.any(block_mask[-1, :]) or np.any(block_mask[:, 0]) or np.any(block_mask[:, -1]):
                         roomGrid_normalized[block_mask] = [-.2, -.2, -.2]
 
-                entitiesList = []
-                with open(f"F:/IsaacEntityData{isaacNumber}.txt", "r") as f:
-                    roomEntities = f.read().strip()
-                if roomEntities:
-                    for entry in roomEntities.split("|"):
-                        fields = entry.split(",")
-                        entity_data = list(map(float, fields))
-                        if entity_data[0] != 8 or entity_data[8] not in removedEffects:
-                            if entity_data[0] == 8 and entity_data[8] not in allowedEffects:
-                                print(entity_data[0], entity_data[8])
-                            normalized_entity = []
-                            if len(entity_data) == 11:
-                                for i, value in enumerate(entity_data):
-                                    normalized_value = value / entitiesNormalization[i]
-                                    normalized_entity.append(normalized_value)
-                                    if normalized_value > 1 or normalized_value < -1:
-                                        print("Normalized entity problem:",i,normalized_value)
-                                entitiesList.append(normalized_entity)
-                if len(entitiesList) > 0:
-                    entitiesListFull[:len(entitiesList)] = entitiesList
+                entityData = np.loadtxt(f"F:/IsaacEntityData{isaacNumber}.txt", delimiter=",", dtype=np.float32)
+                if entityData.ndim == 1:
+                    entityData = entityData.reshape(1, -1)
+                if entityData.size > 0:
+                    # Filter: keep if not category 8, or if category 8 and effect not in removedEffects
+                    keep_mask = np.logical_or(
+                        entityData[:, 0] != 8,
+                        ~np.isin(entityData[:, 8], removedEffects)
+                    )
+                    entityData = entityData[keep_mask]
+                    # Debug: check for unexpected effects and print
+                    debug_mask = np.logical_and(
+                        entityData[:, 0] == 8,
+                        ~np.isin(entityData[:, 8], allowedEffects)
+                    )
+                    for entity in entityData[debug_mask]:
+                        print("Unknown Effect:",entity[0], entity[8])
+
+                    normalizedEntities = entityData / entitiesNormalization  # shape: (N, 13)
+
+                    # Normalization check
+                    bad_mask = (normalizedEntities < 0) | (normalizedEntities > 1)
+                    for i, row in enumerate(normalizedEntities):
+                        for j, val in enumerate(row):
+                            if bad_mask[i, j]:
+                                print("Normalized entity problem:", j, val, entityData[i])
+
+                    # Pad or truncate to fit into fixed memory slot
+                    entitiesListFull = np.zeros((lenEntitiesMemory, numEntityValues), dtype=np.float32)
+                    n = min(len(normalizedEntities), lenEntitiesMemory)
+                    entitiesListFull[:n, :13] = normalizedEntities[:n]
                 else:
                     entitiesListFull = np.zeros((lenEntitiesMemory, numEntityValues), dtype=np.float32)
 
-                entitiesGrids = entityHeatmaps(entitiesList)
+                if useHeatmaps > 1:
+                    entitiesGrids = entityHeatmaps(entityData)
 
                 current_rooms = []
                 for gridIndex, data in floorGridDict.items():
@@ -763,23 +781,25 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 if len(current_rooms) != 0 and any(room_number == room for _, _, room_number in current_rooms):
                     minRoom_x = min(x for x, y, _ in current_rooms)
                     minRoom_y = min(y for x, y, _ in current_rooms)
-                    target_x = minRoom_x * 14
-                    target_y = minRoom_y * 8
+                    target_x = 15 + (minRoom_x - 1) * 14 if minRoom_x > 0 else 0
+                    target_y = 9 + (minRoom_y - 1) * 8 if minRoom_y > 0 else 0
                     maskCurrentRoom = np.any(roomGrid_normalized != -0.2, axis=-1)
                     totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 2:5][maskCurrentRoom] = roomGrid_normalized[maskCurrentRoom]
-                    entitiesGrids = np.transpose(entitiesGrids, (1, 2, 0))  # Shape: (16, 28, 9)
-                    totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, roomChannels-9:roomChannels][maskCurrentRoom] = entitiesGrids[:roomY, :roomX, :][maskCurrentRoom]
+                    if useHeatmaps > 1:
+                        entitiesGrids = np.transpose(entitiesGrids, (1, 2, 0))  # Shape: (16, 28, 9)
+                        totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, roomChannels-useHeatmaps-1:roomChannels][maskCurrentRoom] = entitiesGrids[:roomY, :roomX, :][maskCurrentRoom]
 
                     playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
                     agent_x = playerData["x"] * playerNormalization["x"]
                     agent_y = playerData["y"] * playerNormalization["y"]
                     playerGrid, playerTileX, playerTileY = playerHeatmap(agent_x, agent_y)
-                    totalRoomGrid[:, :, 5] = 0  # Clear player heatmap channel
-                    totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 5] = playerGrid[:roomY, :roomX]
-                    if pathfinding:
-                        targetGrid, _, _ = playerHeatmap(agent_target_x, agent_target_y)
-                        totalRoomGrid[:, :, 6] = 0  # Clear target heatmap channel
-                        totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 6] = targetGrid[:roomY, :roomX]
+                    if useHeatmaps > 0:
+                        totalRoomGrid[:, :, 5] = 0  # Clear player heatmap channel
+                        totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 5] = playerGrid[:roomY, :roomX]
+                        if pathfinding:
+                            targetGrid, _, _ = playerHeatmap(agent_target_x, agent_target_y)
+                            totalRoomGrid[:, :, 6] = 0  # Clear target heatmap channel
+                            totalRoomGrid[target_y:target_y + roomY, target_x:target_x + roomX, 6] = targetGrid[:roomY, :roomX]
 
                     if stateCenteredOnPlayer:
                         section_left = target_x + playerTileX - stateX // 2
@@ -808,9 +828,9 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     if len(playerData["items"]) > 0:
                         normalized_values = [value / 800 for value in playerData["items"]]
                         itemArray[:len(normalized_values)] = normalized_values
-                    additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32),np.array(dataValues, dtype=np.float32),itemArray, entitiesListFull.flatten()])
+                    additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32), dataValues, itemArray, entitiesListFull.flatten()])
 
-                    # 0 to 2 are the tile id, collision and state. 3 is player heatmap. 4 to 12 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laser,effect,slot+beggar.
+                    # 0 and 1 are x y coordinates, 2 to 4 are the tile id, collision and state. 5 is player heatmap. 6 to 14 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laser,effect,slot+beggar.
                     final_state = emptyFinalState.copy_(torch.from_numpy(roomGridSectionF).unsqueeze(0))
                     floorGrid_tensor = emptyFloorTensor.copy_(torch.from_numpy(floorGrid_resized).unsqueeze(0))
                     additional_values_tensor = emptyAdditionalValues.copy_(torch.from_numpy(additional_values).unsqueeze(0))
@@ -832,11 +852,18 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         previousPickups = pickups
 
                     if lastRoom != room:
-                        reward += floorGridDict[room].get("Visits", 0)
-                        floorGridDict[room]["Visits"] = floorGridDict[room].get("Visits", 0) + 1
+                        visits = floorGridDict[room].get("Visits", 0) + 1
+                        floorGridDict[room]["Visits"] = visits
+                        reward += floorGridDict[room].get("Value", 0)/(1+visits)
                         lastRoom = room
 
-                    if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
+                    if visited_rooms > 1 and visited_rooms > last_visited_rooms:
+                        roomHP = totalHP
+                        reward += 10
+                        resetTimer += 250
+                        last_visited_rooms = visited_rooms
+
+                    """if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
                         punishX += 1
                         if punishX > 2:
                             reward += -1
@@ -847,7 +874,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         if punishY > 2:
                             reward += -1
                     else:
-                        punishY = 0
+                        punishY = 0"""
 
                     if actionStates[8] == 1 and playerData["bombs"] == 0 and playerData["golden_bomb"] == 0:
                         reward += -1
@@ -858,50 +885,65 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     if actionStates[11] == 1 and playerData["trinket1"] == 0:
                         reward += -1
 
+                    if currentFloor != playerData["stage"]:
+                        playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
+                        if currentFloor != playerData["stage"]:
+                            print(f"{isaacNumber}. Floor changed...")
+                            target_potential_reward = {}
+                            totalRoomGrid = np.zeros((105, 183, roomChannels), dtype=np.float32)
+                            totalRoomGrid[:, :, 3] = 1 #Fill with solid collision, overwrite after.
+                            global_x, global_y = np.meshgrid(np.linspace(0, 1, 183), np.linspace(0, 1, 105))
+                            totalRoomGrid[:, :, 0] = global_x  # Global x-coordinate, normalized [0, 1]
+                            totalRoomGrid[:, :, 1] = global_y  # Global y-coordinate, normalized [0, 1]
+                            reward += 50
+
                     targets = []
-                    for entity in entitiesList:
-                        if entity[0] == 3:
-                            target_room = current_rooms[0][2]
-                            x = (entity[2] / 40) - 1
-                            y = (entity[3] / 40) - 3
-                            targets.append([(x, y), [target_room % 13, target_room // 13], target_room])
 
-                    for y in range(roomY):
-                        for x in range(roomX):
-                            tile = roomGrid[y][x]
-                            if tile[0] == 16 and tile[2] == 2:  # Door and open
-                                if (x, y) in door_mappings:
-                                    target_room = door_mappings[(x, y)](current_rooms)
-                                else:
-                                    print("Door not listed", x, y)
-                                    continue
-                                if target_room:
-                                    targets.append([(x, y), target_room, current_rooms[0][2]])
-                            elif tile[0] in [17, 23, 20]:  # Non-door targets
-                                target_room = current_rooms[0][2]
-                                targets.append([(x, y), [target_room % 13, target_room // 13], target_room])
-
-                    # Process targets and scale base rewards
-                    for target in targets:
-                        (xtile, ytile), target_target_room, target_current_room = target
-                        target_target_room_idx = target_target_room[1] * 13 + target_target_room[0]
-                        key = (target_current_room, xtile, ytile, target_target_room_idx)
-                        base_reward = floorGridDict[target_target_room_idx]["Value"]
-
-                        target_total_reward = base_reward
-                        for existing_key in target_potential_reward:
-                            if existing_key[0] == target_target_room_idx:
-                                if len(existing_key) >= 4 and existing_key[3] == target_current_room:
-                                    continue
-                                target_total_reward += target_potential_reward[existing_key] * 0.9
-                        floorGridDict.setdefault(target_target_room_idx, {})
-                        visit_count = floorGridDict[target_target_room_idx].get("Visits", 0)
-                        decay_factor = max(0.2, 1.0 - 0.2 * (visit_count - 1))
-
-                        target_potential_reward[key] = target_total_reward * decay_factor
-
-                    # Reward calculation for actions
                     if pathfinding:
+                        if entityData.size > 0:
+                            for entity in entityData:
+                                if entity[0] == 3:
+                                    target_room = current_rooms[0][2]
+                                    x = (entity[2] / 40) - 1
+                                    y = (entity[3] / 40) - 3
+                                    targets.append([(x, y), [target_room % 13, target_room // 13], target_room])
+
+                        for y in range(roomY):
+                            for x in range(roomX):
+                                tile = roomGrid[y][x]
+                                if tile[0] == 16 and tile[2] == 2:  # Door and open
+                                    if (x, y) in door_mappings:
+                                        target_room = door_mappings[(x, y)](current_rooms)
+                                    else:
+                                        print("Door not listed", x, y)
+                                        continue
+                                    if target_room:
+                                        targets.append([(x, y), target_room, current_rooms[0][2]])
+                                elif tile[0] in [17, 23, 20]:  # Non-door targets
+                                    target_room = current_rooms[0][2]
+                                    targets.append([(x, y), [target_room % 13, target_room // 13], target_room])
+
+                        # Process targets and scale base rewards
+                        for target in targets:
+                            (xtile, ytile), target_target_room, target_current_room = target
+                            target_target_room_idx = target_target_room[1] * 13 + target_target_room[0]
+                            key = (target_current_room, xtile, ytile, target_target_room_idx)
+                            base_reward = floorGridDict[target_target_room_idx]["Value"]
+
+                            target_total_reward = base_reward
+                            for existing_key in target_potential_reward:
+                                if existing_key[0] == target_target_room_idx:
+                                    if len(existing_key) >= 4 and existing_key[3] == target_current_room:
+                                        continue
+                                    target_total_reward += target_potential_reward[existing_key] * 0.9
+                            floorGridDict.setdefault(target_target_room_idx, {})
+                            visit_count = floorGridDict[target_target_room_idx].get("Visits", 0)
+                            decay_factor = max(0.2, 1.0 - 0.2 * (visit_count - 1))
+
+                            target_potential_reward[key] = target_total_reward * decay_factor
+
+                        # Reward calculation for actions
+
                         action_x = action % 28
                         action_y = action // 28
                         if action_x < roomX and action_y < roomY:
@@ -931,32 +973,12 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                             else:  # Target is unwalkable tile
                                 reward += -0.01
 
-                    if visited_rooms > 1 and visited_rooms > last_visited_rooms:
-                        roomHP = totalHP
-                        reward += 10
-                        resetTimer += 250
-                        last_visited_rooms = visited_rooms
-                    """if playerData["alive_enemies"] > 0 and totalHP >= roomHP:
-                        reward += 1
-                        resetTimer += 0.5"""
-
-                    if currentFloor != playerData["stage"]:
-                        playerData, totalHP, dataValues = readGameData(isaacNumber, playerData)
-                        if currentFloor != playerData["stage"]:
-                            print(f"{isaacNumber}. Floor changed...")
-                            target_potential_reward = {}
-                            totalRoomGrid = np.zeros((105, 183, roomChannels), dtype=np.float32)
-                            totalRoomGrid[:, :, 3] = 1 #Fill with solid collision, overwrite after.
-                            global_x, global_y = np.meshgrid(np.linspace(0, 1, 183), np.linspace(0, 1, 105))
-                            totalRoomGrid[:, :, 0] = global_x  # Global x-coordinate, normalized [0, 1]
-                            totalRoomGrid[:, :, 1] = global_y  # Global y-coordinate, normalized [0, 1]
-                            reward += 50
-
                     total_reward += reward
 
                 if not manualTesting:
                     # Done conditions
-                    if totalHP == 0 or step_count > resetTimer or (lastRoom != room and freedom == False):
+                    #if totalHP == 0 or step_count > resetTimer or (lastRoom != room and freedom == False):
+                    if totalHP == 0 or len(states) > agent.n_steps:
                         for k in actionStates:
                             actionStates[k] = 0
                         msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + " reset"
@@ -975,13 +997,17 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     actions.append(action)
                     rewards.append(reward)
                     dones.append(done)
+                else:
+                    if playerData["time_counter"] <= 1:
+                        done = True
 
                 currentFloor = playerData["stage"]
                 previousX = playerData["x"]
                 previousY = playerData["y"]
                 previousHP, previousItemsSum, previousEnemyHP, lastEnemyDamage = totalHP, itemsSum, totalEnemyHP, currentEnemyDamage
 
-                if done and len(states) > (agent.n_steps - resetTimer):
+                #if done and len(states) > (agent.n_steps - resetTimer):
+                if done and len(states) > agent.n_steps:
                     total_reward_sum = sum(rewards)  # Total reward for the episode
                     reward_per_step = total_reward_sum / episodeSteps  # Calculate reward per step
                     print(f"Isaac {isaacNumber} - Episode {agent.episode_counter}, "
@@ -1057,7 +1083,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                                 print(f"New reward/step {reward_per_step:.4f} not better than lowest keeper {lowest_keeper[1]:.4f}, skipping save")
                                 should_save = False
                             else:
-                                # Remove the lowest non-keeper if weâ€™re over the limit
+                                # Remove the lowest non-keeper if we’re over the limit
                                 current_files_set = set(f[0] for f in own_files)
                                 keepers_set = set(f[0] for f in files_to_keep)
                                 if len(own_files) >= savesLimit:
