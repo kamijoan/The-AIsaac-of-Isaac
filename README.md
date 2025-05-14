@@ -2,11 +2,9 @@
 Just a bad Python reinforcement learning Torch implementation.
 Do you know about good code practices? Because I don't.
 
-It hasn't even solved picking where to move, current model selects a position in the grid and the game paths there.
+It can learn, it's just not clear what it should learn.
 
-Current biggest issue with it, state representation is too bloated, and even when reduced to the minimum possible the changes from just isaac moving in that space seem to not be big enough.
-
-Proper reward planning might be a second problem, but right now it just memorizes the actions that reward it, the state doesn't clearly tell it why they do.
+Biggest issue is rewards, no clear "correct" answer for every state.
 
 ## To run it
 
@@ -14,7 +12,7 @@ Requires Python 3.12.x
 
 And probably CUDA installed and compatible.
 
-The lua mod require the game to be launched with --luadebug
+The lua mod requires the game to be launched with --luadebug
 
 Either in the steam launch option or in a windows shortcut, and such.
 
