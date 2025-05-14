@@ -5,13 +5,13 @@ from math import ceil
 #torch.set_printoptions(profile="full")
 
 class PPOPolicy(nn.Module):
-    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, lstm_hidden_size = 512):
+    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber):
         super(PPOPolicy, self).__init__()
-        self.room_shape = room_shape  # [14, 16, 28]
+        self.room_shape = room_shape  # [5, 16, 28]
         self.map_shape = map_shape    # [6, 13, 13]
         self.n_critical = n_critical
-        #self.n_items = n_items
-        #self.n_entity_memory = n_entity_memory
+        self.n_items = n_items
+        self.n_entity_memory = n_entity_memory
         self.isaacNumber = isaacNumber
         self.visualData = []
 
@@ -20,42 +20,74 @@ class PPOPolicy(nn.Module):
         self.room_conv1 = nn.Conv2d(room_shape[0], 16, kernel_size=3, padding=1)
         self.room_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
         self.room_conv3 = nn.Conv2d(32, room_out_channels, kernel_size=3, padding=1)
-
-        self.room_pool = nn.MaxPool2d(2)
-        room_out_size = room_out_channels * 8 * 14  # 16x28 → 8x14 after pooling
-
-        # Map grid processing
-        self.map_conv1 = nn.Conv2d(6, 16, kernel_size=3, padding=1)
-        self.map_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        map_out_size = 32 * 13 * 13  # No pooling, stays 13x13
-
-        critical_out_size = 256
-        # Critical values processing
-        self.critical_fc = nn.Sequential(
-            nn.Linear(n_critical, 64),
-            nn.LeakyReLU(0.1),
-            nn.Linear(64, 128),
-            nn.LeakyReLU(0.1),
-            nn.Linear(128, critical_out_size)
+        room_out_size = room_out_channels * room_shape[1] * room_shape[2]
+        self.room_projection = nn.Sequential(
+            nn.Linear(room_out_size, 256),
+            nn.ReLU(),
         )
 
+        # Map grid processing
+        self.map_conv1 = nn.Conv2d(map_shape[0], 16, kernel_size=3, padding=1)
+        self.map_conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        map_out_size = 32 * map_shape[1] * map_shape[2]
+        self.map_projection = nn.Sequential(
+            nn.Linear(map_out_size, 256),
+            nn.ReLU(),
+        )
 
-        # Combined features
-        total_features = room_out_size + map_out_size + critical_out_size
+        # Critical values processing
+        self.critical_fc = nn.Sequential(
+            nn.Linear(n_critical + n_items, 64),  # Adjusted for input size
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
+        )
 
-        self.pre_lstm_fc = nn.Linear(total_features, 1024)  # Reduce to a manageable size
+        # Entity memory processing
+        self.entity_embed = nn.Linear(13, 64)
+        self.entity_transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=64,
+                nhead=8,
+                dim_feedforward=256,
+                dropout=0.1,
+                activation='relu',
+                batch_first=True
+            ),
+            num_layers=2
+        )
+        self.entity_pool = nn.Sequential(
+            nn.Linear(64, 256),
+            nn.ReLU(),
+        )
+
+        # Fusion transformer
+        self.fusion_transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=256,
+                nhead=8,
+                dim_feedforward=512,
+                dropout=0.1,
+                activation='relu',
+                batch_first=True
+            ),
+            num_layers=1
+        )
+        self.fusion_pool = nn.Linear(256 * 4, 1024)
 
         # LSTM layer
-        self.lstm = nn.LSTM(1024, lstm_hidden_size, batch_first=True)
+        self.lstm = nn.LSTM(1024, 512, batch_first=True)
         for name, param in self.lstm.named_parameters():
             if 'bias' in name:
                 n = param.size(0)
-                start, end = n // 4, n // 2  # Forget gate bias range
+                start, end = n // 4, n // 2
                 param.data.fill_(0)
-                param.data[start:end].fill_(1)  # Set forget gate bias to 1
+                param.data[start:end].fill_(1)
 
         # Actor and critic heads
-        self.fc1 = nn.Linear(lstm_hidden_size, 512)
+        self.fc1 = nn.Linear(512, 512)
         self.actor = nn.Linear(512, action_size)
         self.critic = nn.Linear(512, 1)
 
@@ -63,40 +95,52 @@ class PPOPolicy(nn.Module):
         batch_size = room_grid.size(0)
 
         # Room grid processing
-        x_room = F.leaky_relu(self.room_conv1(room_grid), 0.1)
-        x_room = F.leaky_relu(self.room_conv2(x_room), 0.1)
-        x_room = F.leaky_relu(self.room_conv3(x_room), 0.1)
-        x_roomV = self.room_pool(x_room)
+        x_room = F.relu(self.room_conv1(room_grid))
+        x_room = F.relu(self.room_conv2(x_room))
+        x_roomV = F.relu(self.room_conv3(x_room))
         x_room = x_roomV.view(batch_size, -1)
+        x_room = self.room_projection(x_room)  # [batch_size, 256]
 
         # Map grid processing
-        x_map = F.leaky_relu(self.map_conv1(map_grid), 0.1)
-        x_mapV = F.leaky_relu(self.map_conv2(x_map), 0.1)
+        x_map = F.relu(self.map_conv1(map_grid))  # Consistent activation
+        x_mapV = F.relu(self.map_conv2(x_map))
         x_map = x_mapV.view(batch_size, -1)
+        x_map = self.map_projection(x_map)  # [batch_size, 256]
 
         # Critical values processing
-        x_critical = self.critical_fc(additional_values[:, :self.n_critical])
+        critical_input = additional_values[:, :self.n_critical + self.n_items]
+        x_critical = self.critical_fc(critical_input)  # [batch_size, 256]
 
-        x = torch.cat([x_room, x_map, x_critical], dim=1)
-        x = F.leaky_relu(self.pre_lstm_fc(x), 0.1)  # Reduce size before LSTM
-        x = x.unsqueeze(1)
+        # Entity memory processing
+        entities = additional_values[:, self.n_critical + self.n_items:self.n_critical + self.n_items + self.n_entity_memory]
+        entities = entities.view(batch_size, 200, 13)  # [batch_size, 200, 13]
+        x_entities = F.relu(self.entity_embed(entities))  # [batch_size, 200, 64]
+        mask = torch.all(entities == 0, dim=-1)  # [batch_size, 200], mask for inactive entities
+        x_entities = self.entity_transformer(x_entities, src_key_padding_mask=mask)  # [batch_size, 200, 64]
+        x_entities = self.entity_pool(torch.mean(x_entities, dim=1))  # [batch_size, 256]
+
+        # Fuse features with transformer
+        combined = torch.stack([x_room, x_map, x_critical, x_entities], dim=1)  # [batch_size, 4, 256]
+        fused = self.fusion_transformer(combined)  # [batch_size, 4, 256]
+        fused = fused.view(batch_size, -1)  # [batch_size, 4 * 256]
+        x = self.fusion_pool(fused)  # [batch_size, 1024]
+        x = F.relu(x)
+        x = x.unsqueeze(1)  # [batch_size, 1, 1024]
 
         # LSTM processing
         if hidden_state is None:
-            # Initialize hidden state if not provided
             h0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(x.device)
             c0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(x.device)
             hidden_state = (h0, c0)
-        lstm_out, hidden_state = self.lstm(x, hidden_state)  # [batch_size, 1, lstm_hidden_size]
-
-        # Remove time dimension
-        x = lstm_out.squeeze(1)  # [batch_size, lstm_hidden_size]
+        lstm_out, hidden_state = self.lstm(x, hidden_state)
+        x = lstm_out.squeeze(1)  # [batch_size, 512]
 
         # Final layers
-        x = F.leaky_relu(self.fc1(x), 0.1)
+        x = F.relu(self.fc1(x))
         logits = self.actor(x)
         value = self.critic(x)
 
+        # Store visualization data
         self.setVisualData([hidden_state[0], hidden_state[1], x_roomV, x_mapV, x])
 
         return logits, value, hidden_state
@@ -104,7 +148,7 @@ class PPOPolicy(nn.Module):
     def setVisualData(self, rawData):
         for index, data in enumerate(rawData):
             if len(data.shape) == 4:
-                batch_size, channels, viewX, viewY = data.shape
+                batch_size, channels, viewY, viewX = data.shape
                 data_padded = data
             else:
                 viewX = 28
@@ -137,14 +181,14 @@ class PPOPolicy(nn.Module):
                 self.visualData[index] = data_padded.view(batch_size, channels, viewY, viewX)
 
 class PPOAgent:
-    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, clip_param=0.2, value_loss_coef=0.5, gamma=0.9, max_grad_norm=0.5, n_steps=2048):
+    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, clip_param=0.2, value_loss_coef=0.5, gamma=0.99, max_grad_norm=0.5, n_steps=4096):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = PPOPolicy(room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber).to(self.device)
         # Share the policy's parameters across processes
         self.policy.share_memory()  # Makes the model's parameters shared in memory
 
-        lr = 0.0002 * isaacNumber
-        entropy_coef = 0.003 * isaacNumber
+        lr = 0.0002
+        entropy_coef = 0.003
 
         self.optimizer = torch.optim.Adam([
             {'params': [p for n, p in self.policy.named_parameters() if 'critic' not in n], 'lr': lr},
