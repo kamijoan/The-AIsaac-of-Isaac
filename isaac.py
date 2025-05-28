@@ -4,14 +4,14 @@ from threading import Thread
 from scipy.ndimage import label
 from os import path,listdir,remove
 import numpy as np
-import cv2,torch
+import cv2
 import torch.multiprocessing as mp
+
 #torch.set_printoptions(profile="full")
 
 from isaacPPO import PPOPolicy, PPOAgent
-#from isaacPPOTransformer import PPOPolicy, PPOAgent
 
-def run_instance(isaacNumber, control_dict, learn_lock):
+def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy, rollout_queue):
 
     def execute_action(action, actionStates, actionCounter, isaacNumber):
         actionCounter += 1
@@ -61,7 +61,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     else:
                         playerData[key] = norm_value
                         if playerData[key] > 1 or playerData[key] < 0:
-                            print("Normalized Stat problem:",key,playerData[key])
+                            print("Normalized Stat problem:",key,playerData[key],"formula:",playerData[key]*playerNormalization[key],"/",playerNormalization[key])
                 elif key in playerData:
                     playerData[key] = int(value)
 
@@ -210,9 +210,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                             y = (y + 3) * 40
                             cv2.circle(overlay, (int(x / 10), int(y / 10)), 1, (255, 0, 0), -1)
 
-                entropy = -torch.sum(agent.probs * torch.log(agent.probs + 1e-6))
-                max_entropy = np.log(action_size)
-                randomness = (entropy / max_entropy) * 100
+                randomness = (agent.entropy / np.log(action_size)) * 100
                 randomness = min(max(randomness, 0), 100)
 
                 reward_color = (0, 255, 0) if reward >= 0 else (0, 0, 255)
@@ -221,14 +219,10 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 (text_width, _), _ = cv2.getTextSize(f"Total Reward: {total_reward:.2f}, Reward:", cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)
                 cv2.putText(overlay, f"{reward:+.3f}", (2 + text_width, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, reward_color, 1)
                 #cv2.putText(overlay, f"Reset in {resetTimer + 1 - step_count} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                cv2.putText(overlay, f"Reset in {agent.n_steps+1 - len(states)} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                cv2.putText(overlay, f"Reset in {agent.n_steps+1 - len(agent.states)} | Confidence: {(100-randomness):.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 cv2.putText(overlay, f"Episode: {agent.episode_counter}", (2, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
-                probs_list_values = agent.probs.squeeze().cpu().tolist()
-                min_prob = min(probs_list_values)
-                max_prob = max(probs_list_values)
-                graphProbs = [(p - min_prob) / (max_prob - min_prob + 1e-6) * 100 for p in probs_list_values]  # Normalized to 0-100
-
+                graphProbs = agent.probs
                 if pathfinding:
                     cv2.circle(overlay, (int(agent_target_x / 10), int(agent_target_y / 10)), 2, (2, 2, 255), 0)
                     prob_grid = np.array(graphProbs).reshape(16, 28)  # Your 16x28 grid
@@ -271,7 +265,7 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                             cv2.putText(overlay, letter, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
                 #learn() progress bar
-                cv2.rectangle(overlay, (0,190),(int((len(states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
+                cv2.rectangle(overlay, (0,190),(int((len(agent.states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
                 cv2.rectangle(overlay, (0,190),(int((agent.progress / 100) * overlay.shape[1]),200), (50,200,50), -1)
 
                 if len(agent.policy.visualData) != 0:
@@ -286,15 +280,15 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         timer = 0
                         print("Graph Index:",visualDataIndex)
 
-                    visualData = agent.policy.visualData[visualDataIndex].detach().clone().cpu()
+                    visualData = agent.policy.visualData[visualDataIndex].detach().to("cpu", non_blocking=True)
 
                     # Convert visualData to numpy based on shape
                     if len(visualData.shape) == 4:
-                        layers = visualData[0].to("cpu", non_blocking=True).numpy()  # First batch item
+                        layers = visualData[0].numpy()  # First batch item
                     elif len(visualData.shape) == 3:
-                        layers = visualData.to("cpu", non_blocking=True).numpy()
+                        layers = visualData.numpy()
                     elif len(visualData.shape) == 2:
-                        layers = visualData.unsqueeze(0).to("cpu", non_blocking=True).numpy()
+                        layers = visualData.unsqueeze(0).numpy()
                     else:
                         raise ValueError(f"Unexpected number of channels: {visualData.shape}")
 
@@ -435,10 +429,10 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         "golden_bomb": 1,
         "golden_key": 1,
         "active1": 800,  # Max item ID in Repentance
-        "charge1": 12,  # Most active items max out at 12 charge
+        "charge1": 100,  # Most active items max out at 12 charge
         "full_charge1": 1,
         "active2": 800,
-        "charge2": 12,
+        "charge2": 100,
         "full_charge2": 1,
         "trinket1": 200,  # Max trinket ID
         "trinket2": 200,
@@ -455,22 +449,27 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         "first_visit": 1,
         "stage": 20
     }
+    action_size = 8
+    pathfinding = True if action_size > 100 else False
+    useHeatmaps = 0 #0 or 10, maybe 1 for only player
+    roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
+    stateX,stateY = 28, 16
 
     entitiesNormalization = np.array([
-    10,        # 0: Category
-    1000,      # 1: Entity ID
-    1200,      # 2: X pos
-    1200,      # 3: Y pos
-    30,        # 4: X vel negative
-    30,        # 5: X vel
-    30,        # 6: Y vel negative
-    30,        # 7: Y vel
-    10000,     # 8: HP, explosion dmg
-    10000,     # 9: isInvincible, etc.
-    10000,     # 10: collision dmg, etc.
-    10000,     # 11: size, scale, etc.
-    1e14       # 12: flags
-], dtype=np.float32)
+        10,        # 0: Category
+        1000,      # 1: Entity ID
+        1200,      # 2: X pos
+        1200,      # 3: Y pos
+        30,        # 4: X vel negative
+        30,        # 5: X vel
+        30,        # 6: Y vel negative
+        30,        # 7: Y vel
+        10000,     # 8: HP, explosion dmg
+        10000,     # 9: isInvincible, etc.
+        10000,     # 10: collision dmg, etc.
+        10000,     # 11: size, scale, etc.
+        1e14       # 12: flags
+    ], dtype=np.float32)
 
     door_mappings = {
         (0, 4): lambda rooms: (min(t[0] for t in rooms) - 1, min(t[1] for t in rooms)),  # left x1 or left up x2
@@ -522,6 +521,9 @@ def run_instance(isaacNumber, control_dict, learn_lock):
         29: 2
     }
 
+    opposite_actions = {0: 1, 1: 0, 2: 3, 3: 2}
+    shooting_actions = {4, 5, 6, 7}  # Only one can be active
+
     playerData = {key:0 for key in playerNormalization}
     playerData["items"] = []
     playerData["time_counter"] = 0
@@ -534,33 +536,23 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     room_height = room_y_max - room_y_min
 
     actionStates = {i: 0 for i in range(12)}
-    previous_state = actionStates.copy()  # Store last known states
-    opposite_actions = {0: 1, 1: 0, 2: 3, 3: 2}
-    shooting_actions = {4, 5, 6, 7}  # Only one can be active
-    #map only for manual teaching
-    key_map = {0: 'a',  1: 'd',  2: 'w',  3: 's',  # Movement: Left, Right, Up, Down
-               4: 'j',  5: 'l',  6: 'i',  7: 'k',  # Shooting: Left, Right, Up, Down
-               8: 't',  9: 'f', 10: 'g', 11: 'h'}   # Bomb, Item, Card, Drop
 
     itemArray = np.zeros(50, dtype=np.float32)
     keyboardKeys = list(actionStates.values()) #12 keys
     reset,done = False,True
+    resetEpisode = True
     lenEntitiesMemory = 200
     numEntityValues = 13
     num_additional_values = len(keyboardKeys)+len(playerNormalization)+len(itemArray)+(lenEntitiesMemory*numEntityValues)
-    action_size = 8
-    pathfinding = True if action_size > 100 else False
-    useHeatmaps = 0 #0 or 10, maybe 1 for only player
-    roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
 
     stateCenteredOnPlayer = True #The overall state varies more, might help with "just the player moving" not being enough difference between states.
-    stateX,stateY = 28, 16
 
-    agent = PPOAgent(room_shape=(roomChannels, stateY, stateX),map_shape=(6, 13, 13),action_size=action_size,n_critical=len(keyboardKeys)+len(playerNormalization),n_items=len(itemArray),n_entity_memory=(lenEntitiesMemory * numEntityValues), isaacNumber=isaacNumber)
+    agent = agentCopy
+    agent.isaacNumber = isaacNumber
 
-    emptyFloorTensor = torch.empty((1, 6, 13, 13), dtype=torch.float32, device="cuda")
-    emptyAdditionalValues = torch.empty((1,num_additional_values), dtype=torch.float32, device="cuda")
-    emptyFinalState = torch.empty((1,roomChannels,stateY,stateX), dtype=torch.float32, device="cuda")
+    emptyFloorTensor = np.zeros((6,13,13), dtype=np.float32)
+    emptyAdditionalValues =  np.zeros((num_additional_values), dtype=np.float32)
+    emptyFinalState = np.zeros((roomChannels,stateY,stateX),  dtype=np.float32)
 
     roomX,roomY = 15, 9
     overlay_thread = Thread(target=drawOverlay, daemon=True)
@@ -569,46 +561,13 @@ def run_instance(isaacNumber, control_dict, learn_lock):
     manualLearning = False
     manualTesting = False
 
-    # PPO rollout storage
-    states = []
-    actions = []
-    rewards = []
-    dones = []
-    log_probs_list = []
-    values_list = []
-    hidden_states = []
-    states.append((emptyFinalState.clone(), emptyFloorTensor.clone(), emptyAdditionalValues.clone()))
+    agent.states.append((emptyFinalState, emptyFloorTensor, emptyAdditionalValues))
 
     #effect ids, still in progress, removed ones don't reach the state, allowed ones just don't get printed.
-    removedEffects = [2,3,4,5,7,11,12,13,14,15,16,17,20,21,27,33,38,43,58,59,63,64,65,66,68,79,86,99,133,146]
-    removedEffects = np.array(removedEffects, dtype=float)
-    allowedEffects = [1,6,22,23,24,25,26,34,44,45,46,50,57,61,62]
-    allowedEffects = np.array(allowedEffects, dtype=float)
+    removedEffects = np.array([2,3,4,5,7,11,12,13,14,15,16,17,20,21,27,33,38,43,58,59,63,64,65,66,68,79,80,86,99,133,146], dtype=float)
+    allowedEffects = np.array([1,6,22,23,24,25,26,30,34,44,45,46,50,57,61,62], dtype=float)
 
     print(f"Running Isaac {isaacNumber}...")
-    try:
-        model_dir = "F:/"
-        best_model_path = None
-        best_reward_per_step = -float('inf')
-        for filename in listdir(model_dir):
-            if filename.startswith(f"isaacPPOModelIsaac{isaacNumber}RPS") and filename.endswith(".pth"):
-                try:
-                    start_rps = filename.index("RPS") + 3
-                    start_ep = filename.index("EP")
-                    file_rps = float(filename[start_rps:start_ep])
-                    if file_rps > best_reward_per_step:
-                        best_reward_per_step = file_rps
-                        best_model_path = path.join(model_dir, filename)
-                except (ValueError, IndexError) as e:
-                    print(f"Skipping invalid filename {filename}: {e}")
-                    continue
-        if best_model_path:
-            agent.load(best_model_path)  # Uses your load method
-            print(f"Loaded best model for Isaac {isaacNumber}: {best_model_path} with reward/step {best_reward_per_step:.4f}")
-        else:
-            raise FileNotFoundError("No valid model files found")
-    except Exception as e:
-        print(f"No model found for Isaac {isaacNumber}: {e}")
 
     with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
         f.write("")
@@ -666,17 +625,25 @@ def run_instance(isaacNumber, control_dict, learn_lock):
             totalRoomGrid[:, :, 1] = global_y  # Global y-coordinate, normalized [0, 1]
 
             hidden_state = None
+            resetEpisode = False
+
+            with learn_lock:
+                if shared_model:
+                    state_dict = dict(shared_model)
+                    if agent.device.type == "cuda":
+                        state_dict = {key: value.to(agent.device) for key, value in state_dict.items()}
+                    agent.policy.load_state_dict(state_dict)
 
             sleep(1)
 
-            while not done:
+            stepsInRoom = 0
+
+            while not done and not resetEpisode:
 
                 step_count += 1
+                stepsInRoom += 1
 
-                action, log_prob, value, hidden_state = agent.act((final_state, floorGrid_tensor, additional_values_tensor),hidden_state)
-                log_probs_list.append(log_prob)
-                values_list.append(value)
-                hidden_states.append(hidden_state)
+                action = agent.act(final_state, floorGrid_tensor, additional_values_tensor)
 
                 if not manualTesting and not manualLearning:
                     if pathfinding:
@@ -831,9 +798,9 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                     additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32), dataValues, itemArray, entitiesListFull.flatten()])
 
                     # 0 and 1 are x y coordinates, 2 to 4 are the tile id, collision and state. 5 is player heatmap. 6 to 14 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laser,effect,slot+beggar.
-                    final_state = emptyFinalState.copy_(torch.from_numpy(roomGridSectionF).unsqueeze(0))
-                    floorGrid_tensor = emptyFloorTensor.copy_(torch.from_numpy(floorGrid_resized).unsqueeze(0))
-                    additional_values_tensor = emptyAdditionalValues.copy_(torch.from_numpy(additional_values).unsqueeze(0))
+                    final_state = roomGridSectionF
+                    floorGrid_tensor = floorGrid_resized
+                    additional_values_tensor = additional_values
 
                     #Rewards
                     with open(f"F:/IsaacEnemyDamage{isaacNumber}.txt", "r") as f:
@@ -856,25 +823,31 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                         floorGridDict[room]["Visits"] = visits
                         reward += floorGridDict[room].get("Value", 0)/(1+visits)
                         lastRoom = room
+                        stepsInRoom = 0
+                        if not freedom:
+                            done = True
 
-                    if visited_rooms > 1 and visited_rooms > last_visited_rooms:
+                    if visited_rooms > last_visited_rooms and visited_rooms > 1:
                         roomHP = totalHP
                         reward += 10
                         resetTimer += 250
                         last_visited_rooms = visited_rooms
 
-                    """if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
+                    """if stepsInRoom > 200 and room == 84:
+                        reward += -.1"""
+
+                    if (actionStates[0] == 1 or actionStates[1] == 1) and previousX == playerData["x"]:
                         punishX += 1
-                        if punishX > 2:
-                            reward += -1
+                        if punishX > 30:
+                            reward += -.01
                     else:
                         punishX = 0
                     if (actionStates[2] == 1 or actionStates[3] == 1) and previousY == playerData["y"]:
                         punishY += 1
-                        if punishY > 2:
-                            reward += -1
+                        if punishY > 30:
+                            reward += -.01
                     else:
-                        punishY = 0"""
+                        punishY = 0
 
                     if actionStates[8] == 1 and playerData["bombs"] == 0 and playerData["golden_bomb"] == 0:
                         reward += -1
@@ -898,6 +871,12 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                             reward += 50
 
                     targets = []
+
+
+                    if playerData["extra_lives"] != 0:
+                        print("lives:",playerData["extra_lives"])
+
+
 
                     if pathfinding:
                         if entityData.size > 0:
@@ -977,26 +956,22 @@ def run_instance(isaacNumber, control_dict, learn_lock):
 
                 if not manualTesting:
                     # Done conditions
-                    #if totalHP == 0 or step_count > resetTimer or (lastRoom != room and freedom == False):
-                    if totalHP == 0 or len(states) > agent.n_steps:
+                    #if totalHP == 0 or step_count > resetTimer :
+                    if totalHP == 0 or done or step_count>agent.n_steps:
                         for k in actionStates:
                             actionStates[k] = 0
                         msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + " reset"
+                        resetEpisode = True
                         with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
                             f.write(msg)
                         done = True
-                        emptyFinalState.zero_()
-                        emptyFloorTensor.zero_()
-                        emptyAdditionalValues.zero_()
                         #print(f"{isaacNumber}. Main loop step counter: {step_count}, Episode {agent.episode_counter}, Total Reward: {total_reward}, Per step: {(total_reward/step_count):.2f}")
-                        freedom = True
+                        #freedom = True
                         total_reward = 0
                         episodeSteps += step_count
 
-                    states.append((final_state.clone(), floorGrid_tensor.clone(), additional_values_tensor.clone()))
-                    actions.append(action)
-                    rewards.append(reward)
-                    dones.append(done)
+                    agent.rewards.append(reward)
+                    agent.dones.append(done)
                 else:
                     if playerData["time_counter"] <= 1:
                         done = True
@@ -1007,163 +982,94 @@ def run_instance(isaacNumber, control_dict, learn_lock):
                 previousHP, previousItemsSum, previousEnemyHP, lastEnemyDamage = totalHP, itemsSum, totalEnemyHP, currentEnemyDamage
 
                 #if done and len(states) > (agent.n_steps - resetTimer):
-                if done and len(states) > agent.n_steps:
-                    total_reward_sum = sum(rewards)  # Total reward for the episode
-                    reward_per_step = total_reward_sum / episodeSteps  # Calculate reward per step
-                    print(f"Isaac {isaacNumber} - Episode {agent.episode_counter}, "
-                          f"Total Reward: {total_reward_sum:.2f}, Reward/Step: {reward_per_step:.4f}")
-
-                    with learn_lock:
-                        agent.learn((states, actions, rewards, dones, log_probs_list, values_list, hidden_states))
-                        states.clear()
-                        actions.clear()
-                        rewards.clear()
-                        dones.clear()
-                        log_probs_list.clear()
-                        values_list.clear()
-                        hidden_states.clear()
-                        torch.cuda.empty_cache()
-
-                    states.append((emptyFinalState.clone(), emptyFloorTensor.clone(), emptyAdditionalValues.clone()))
-
-                    agent.episode_counter += 1
-                    if not manualLearning and not manualTesting:
-                        reward_per_step = total_reward_sum / episodeSteps
-                        episodeSteps = 0
-                        savesLimit = 3  # Total number of models to keep
-                        n_next_best = 1  # Number of next-best models to keep (adjustable, savesLimit - 2 at most)
-                        model_dir = "F:/"
-                        model_path = f"F:/isaacPPOModelIsaac{isaacNumber}RPS{reward_per_step:.4f}EP{agent.episode_counter}.pth"
-
-                        own_files = []  # (path, rps, ep)
-                        all_files = []  # (path, rps, isaac_num, ep)
-                        for filename in listdir(model_dir):
-                            if filename.startswith("isaacPPOModelIsaac") and filename.endswith(".pth"):
-                                try:
-                                    start_isaac = filename.index("Isaac") + 5
-                                    start_rps = filename.index("RPS") + 3
-                                    start_ep = filename.index("EP")
-                                    end_ep = filename.rindex(".pth")
-                                    file_isaac_num = int(filename[start_isaac:start_rps-3])
-                                    file_rps = float(filename[start_rps:start_ep])
-                                    file_ep = int(filename[start_ep + 2:end_ep])
-                                    full_path = path.join(model_dir, filename)
-                                    if file_isaac_num == isaacNumber:
-                                        own_files.append((full_path, file_rps, file_ep))
-                                    all_files.append((full_path, file_rps, file_isaac_num, file_ep))
-                                except (ValueError, IndexError) as e:
-                                    print(f"Skipping invalid filename {filename}: {e}")
-                                    continue
-
-                        # Sort own_files by episode (latest) and reward (highest)
-                        own_files.sort(key=lambda x: (x[2], x[1]), reverse=True)  # Latest episode first, then highest rps
-                        if own_files:
-                            highest_rps_file = max(own_files, key=lambda x: x[1])  # Highest reward per step
-                            latest_file = own_files[0]  # Latest by episode number
-
-                        # Decide whether to save the new model
-                        should_save = True
-                        files_to_keep = []
-                        if len(own_files) >= savesLimit:
-                            # Define priority: highest, latest, then n next best
-                            files_to_keep = [highest_rps_file]
-                            if latest_file[0] != highest_rps_file[0]:  # Add latest if not same as highest
-                                files_to_keep.append(latest_file)
-
-                            # Get remaining slots for next best
-                            remaining_slots = savesLimit - len(files_to_keep)
-                            n_next_best = min(n_next_best, remaining_slots)  # Adjust n if too large
-                            other_files = [f for f in own_files if f[0] not in [highest_rps_file[0], latest_file[0]]]
-                            other_files.sort(key=lambda x: x[1], reverse=True)  # Sort by reward descending
-                            files_to_keep.extend(other_files[:n_next_best])  # Add n next best
-
-                            # Check if new reward beats the lowest of the keepers
-                            lowest_keeper = min(files_to_keep, key=lambda x: x[1])
-                            if reward_per_step <= lowest_keeper[1] and len(own_files) >= savesLimit:
-                                print(f"New reward/step {reward_per_step:.4f} not better than lowest keeper {lowest_keeper[1]:.4f}, skipping save")
-                                should_save = False
-                            else:
-                                # Remove the lowest non-keeper if we’re over the limit
-                                current_files_set = set(f[0] for f in own_files)
-                                keepers_set = set(f[0] for f in files_to_keep)
-                                if len(own_files) >= savesLimit:
-                                    to_remove = min([f for f in own_files if f[0] not in keepers_set], key=lambda x: x[1], default=None)
-                                    if to_remove:
-                                        remove(to_remove[0])
-                                        print(f"Removed {to_remove[0]} with reward/step {to_remove[1]:.4f}")
-
-                        if should_save:
-                            agent.save(model_path)
-                            print(f"Saved new model at {model_path} with reward/step {reward_per_step:.4f}")
-                            own_files.append((model_path, reward_per_step, agent.episode_counter))
-
-                        # Blending logic (every 25 episodes)
-                        if len(own_files) >= savesLimit and agent.episode_counter % 25 == 0:
-                            current_reward_per_step = reward_per_step
-                            best_model_path = max(own_files, key=lambda x: x[1])[0]  # Default to own best
-                            best_reward_per_step = current_reward_per_step
-                            best_instance_id = isaacNumber
-
-                            for file_path, file_rps, file_isaac_num, _ in all_files:
-                                if file_rps > best_reward_per_step:
-                                    best_reward_per_step = file_rps
-                                    best_model_path = file_path
-                                    best_instance_id = file_isaac_num
-
-                            if best_reward_per_step > current_reward_per_step:
-                                try:
-                                    checkpoint = torch.load(best_model_path, map_location=agent.device)
-                                    best_state_dict = checkpoint['policy_state_dict']
-                                    current_state_dict = agent.policy.state_dict()
-
-                                    best_keys = set(best_state_dict.keys())
-                                    current_keys = set(current_state_dict.keys())
-                                    common_keys = best_keys.intersection(current_keys)
-                                    missing_in_best = current_keys - best_keys
-                                    missing_in_current = best_keys - current_keys
-
-                                    if missing_in_best or missing_in_current:
-                                        print(f"Warning: Model mismatch for Isaac {isaacNumber} blending with {best_model_path}")
-                                        if missing_in_best:
-                                            print(f"Keys in current but not in best: {missing_in_best}")
-                                        if missing_in_current:
-                                            print(f"Keys in best but not in current: {missing_in_current}")
-                                        if not common_keys:
-                                            raise ValueError("No common parameters to blend; models are incompatible")
-
-                                    reward_diff = best_reward_per_step - current_reward_per_step
-                                    alpha = min(0.9, reward_diff / (reward_diff + 0.1))
-
-                                    new_state_dict = {}
-                                    critic_params = ['critic.weight', 'critic.bias']
-                                    for key in common_keys:
-                                        if key in critic_params:
-                                            new_state_dict[key] = current_state_dict[key]
-                                        else:
-                                            new_state_dict[key] = (1 - alpha) * current_state_dict[key] + alpha * best_state_dict[key]
-                                    for key in current_state_dict.keys():
-                                        if key not in new_state_dict:
-                                            new_state_dict[key] = current_state_dict[key]
-
-                                    agent.policy.load_state_dict(new_state_dict)
-                                    print(f"Isaac {isaacNumber} blended model with {best_model_path} "
-                                          f"(Reward/Step: {best_reward_per_step:.4f}, Weight: {alpha:.2f}), "
-                                          f"critic parameters unchanged from current model")
-
-                                    agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                                    agent.step_counter = max(agent.step_counter, checkpoint['step_counter'])
-                                    agent.episode_counter = max(agent.episode_counter, checkpoint['episode_counter'])
-                                    print(f"Updated optimizer, step_counter={agent.step_counter}, episode_counter={agent.episode_counter}")
-
-                                except Exception as e:
-                                    print(f"Isaac {isaacNumber} failed to blend model from {best_model_path}: {e}")
+                if done or len(agent.states) > agent.n_steps:
+                    agent.sendRollouts(done)
+                    total_reward = 0.0
+                    episodeSteps = 0
 
 if __name__ == "__main__":
     mp.set_start_method('spawn')  # Required for CUDA in multiprocessing
     manager = mp.Manager()
     control_dict = manager.dict()  # Controls whether instances should run
+    shared_model = manager.dict()
     processes = {}  # Store running processes
     learn_lock = mp.Lock()
+    rollout_queue = mp.Queue()
+
+    playerNormalization = {
+        "x": 1200,
+        "y": 1200,
+        "vxneg": 30,
+        "vx": 30,
+        "vyneg": 30,
+        "vy": 30,
+        "hp": 24,  # Max red hearts
+        "max_hp": 24,
+        "soul_hp": 24,
+        "black_hp": 24,
+        "rotten_hp": 24,
+        "bone_hp": 6,
+        "eternal_hp": 2,
+        "extra_lives": 10,  # Based on Dead Cat, Lazarus, etc.
+        "coins": 100,
+        "bombs": 100,
+        "keys": 100,
+        "golden_bomb": 1,
+        "golden_key": 1,
+        "active1": 800,  # Max item ID in Repentance
+        "charge1": 12,  # Most active items max out at 12 charge
+        "full_charge1": 1,
+        "active2": 800,
+        "charge2": 12,
+        "full_charge2": 1,
+        "trinket1": 200,  # Max trinket ID
+        "trinket2": 200,
+        "damage": 100,  # Extremely high damage (Soy Milk is 0.5, Brimstone is ~10)
+        "fire_rate": 100,  # Higher = slower (default 10, Soy Milk ~2)
+        "shot_speed": 2,
+        "range": 500,
+        "luck": 10,
+        "speed": 2,
+        "card": 100,  # Max card ID
+        "pill": 13,  # Max pill ID
+        "alive_enemies": 100,
+        "room_type": 30,
+        "first_visit": 1,
+        "stage": 20
+    }
+    action_size = 8
+    pathfinding = True if action_size > 100 else False
+    useHeatmaps = 0 #0 or 10, maybe 1 for only player
+    roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
+    stateX,stateY = 28, 16
+
+    learnerAgent = PPOAgent(
+        room_shape=(roomChannels, stateY, stateX),
+        map_shape=(6, 13, 13),action_size=action_size,
+        n_critical=12+len(playerNormalization),
+        n_items=50,
+        n_entity_memory=200*13,
+        isaacNumber=0,
+        shared_model=shared_model,
+        learn_lock=learn_lock,
+        rollout_queue=rollout_queue)
+
+    # Load the best model and initialize shared_model with CPU tensors
+    try:
+        learnerAgent.load("F:/isaacPPOModel.pth")
+        print(f"Loaded best model and initialized shared_model.")
+    except Exception as e:
+        print(f"No model found: {e}")
+
+    with learn_lock:
+        # Ensure CPU tensors
+        cpu_state_dict = {key: value.cpu() for key, value in learnerAgent.policy.state_dict().items()}
+        shared_model.clear()
+        shared_model.update(cpu_state_dict)
+
+    # Start learner process
+    learner_process = mp.Process(target=learnerAgent.run)
+    learner_process.start()
 
     while True:
         try:
@@ -1178,7 +1084,10 @@ if __name__ == "__main__":
                         isaacNumber = int(num)
                         if f"isaac_{isaacNumber}" not in processes:
                             control_dict[f"isaac_{isaacNumber}"] = True
-                            p = mp.Process(target=run_instance, args=(isaacNumber, control_dict, learn_lock))
+                            p = mp.Process(
+                                target=run_instance,
+                                args=(isaacNumber, control_dict, shared_model, learn_lock, learnerAgent, rollout_queue)
+                            )
                             p.start()
                             processes[f"isaac_{isaacNumber}"] = p
                             print(f"Started Isaac {isaacNumber}")
