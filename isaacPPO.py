@@ -14,7 +14,9 @@ class PPOPolicy(nn.Module):
         self.n_items = n_items
         self.n_entity_memory = n_entity_memory
         self.isaacNumber = isaacNumber
-        self.visualData = []
+        self.visualData = {}
+        self.numVisualData = 0
+        self.visualDataIndex = 0
 
         room_out_channels = 64
         # Room grid processing
@@ -150,41 +152,39 @@ class PPOPolicy(nn.Module):
         value = self.critic(x)
 
         # Store visualization data
-        #self.setVisualData([hidden_state[0], hidden_state[1], x_roomV, x_mapV, x])
-        self.setVisualData([x])
+        self.setVisualData([hidden_state[0], hidden_state[1], x_roomV, x_mapV, x])
         return logits, value, hidden_state
 
     def setVisualData(self, rawData):
+        self.numVisualData = len(rawData)
         for index, data in enumerate(rawData):
-            if len(data.shape) == 4:
-                batch_size, channels, viewY, viewX = data.shape
-                data_padded = data
-            else:
-                viewX = 28
-                if len(data.shape) == 2:
-                    channels = 1
-                    batch_size, n = data.shape
-                elif len(data.shape) == 3:
-                    channels, batch_size, n = data.shape
-                if n == 512:
-                    viewX = 32
-                    viewY = 16
-                    data_padded = data
-                elif n == 1024:
-                    viewX = 32
-                    viewY = 32
+            if index == self.visualDataIndex:
+                if len(data.shape) == 4:
+                    batch_size, channels, viewY, viewX = data.shape
                     data_padded = data
                 else:
-                    viewY = ceil(n / viewX)
-                    target_n = viewY * viewX
-                    if n < target_n:
-                        padding = target_n - n
-                        data_padded = torch.nn.functional.pad(data, (0, padding))
-                    else:
+                    viewX = 28
+                    if len(data.shape) == 2:
+                        channels = 1
+                        batch_size, n = data.shape
+                    elif len(data.shape) == 3:
+                        channels, batch_size, n = data.shape
+                    if n == 512:
+                        viewX = 32
+                        viewY = 16
                         data_padded = data
-            if len(self.visualData) < index + 1:
-                self.visualData.append(data_padded.view(batch_size, channels, viewY, viewX))
-            else:
+                    elif n == 1024:
+                        viewX = 32
+                        viewY = 32
+                        data_padded = data
+                    else:
+                        viewY = ceil(n / viewX)
+                        target_n = viewY * viewX
+                        if n < target_n:
+                            padding = target_n - n
+                            data_padded = torch.nn.functional.pad(data, (0, padding))
+                        else:
+                            data_padded = data
                 self.visualData[index] = data_padded.view(batch_size, channels, viewY, viewX)
 
 class PPOAgent:
