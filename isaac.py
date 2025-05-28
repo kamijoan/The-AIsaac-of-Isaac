@@ -129,7 +129,7 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
         return tuple(int(c) for c in bgr_color)  # Convert to (B, G, R)
 
     def drawOverlay():
-        visualDataIndex = channelIndex = timer = 0
+        channelIndex = timer = 0
         tile_size = 4
         while True:
             timer += 1
@@ -268,119 +268,92 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                 cv2.rectangle(overlay, (0,190),(int((len(agent.states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
                 cv2.rectangle(overlay, (0,190),(int((agent.progress / 100) * overlay.shape[1]),200), (50,200,50), -1)
 
-                if len(agent.policy.visualData) != 0:
-                    if is_pressed('7') and visualDataIndex > 0 and timer > 10:
-                        visualDataIndex -= 1
-                        channelIndex = 0
-                        timer = 0
-                        print("Graph Index:",visualDataIndex)
-                    if is_pressed('9') and visualDataIndex < len(agent.policy.visualData)-1 and timer > 5:
-                        visualDataIndex += 1
-                        channelIndex = 0
-                        timer = 0
-                        print("Graph Index:",visualDataIndex)
+                if is_pressed('7') and agent.policy.visualDataIndex > 0 and timer > 10:
+                    agent.policy.visualDataIndex -= 1
+                    channelIndex = 0
+                    timer = 0
+                    print("Graph Index:",agent.policy.visualDataIndex)
+                if is_pressed('9') and agent.policy.visualDataIndex < agent.policy.numVisualData-1 and timer > 5:
+                    agent.policy.visualDataIndex += 1
+                    channelIndex = 0
+                    timer = 0
+                    print("Graph Index:",agent.policy.visualDataIndex)
 
-                    visualData = agent.policy.visualData[visualDataIndex].detach().to("cpu", non_blocking=True)
+                visualData = agent.policy.visualData[agent.policy.visualDataIndex].detach().to("cpu", non_blocking=True)
 
-                    # Convert visualData to numpy based on shape
-                    if len(visualData.shape) == 4:
-                        layers = visualData[0].numpy()  # First batch item
-                    elif len(visualData.shape) == 3:
-                        layers = visualData.numpy()
-                    elif len(visualData.shape) == 2:
-                        layers = visualData.unsqueeze(0).numpy()
-                    else:
-                        raise ValueError(f"Unexpected number of channels: {visualData.shape}")
+                # Convert visualData to numpy based on shape
+                if len(visualData.shape) == 4:
+                    layers = visualData[0].numpy()  # First batch item
+                elif len(visualData.shape) == 3:
+                    layers = visualData.numpy()
+                elif len(visualData.shape) == 2:
+                    layers = visualData.unsqueeze(0).numpy()
+                else:
+                    raise ValueError(f"Unexpected number of channels: {visualData.shape}")
 
-                    num_layers, height, width = layers.shape
+                num_layers, height, width = layers.shape
 
-                    # Handle channel index changes
-                    if is_pressed('4') and channelIndex > 0 and timer > 4:
-                        channelIndex -= 1
-                        timer = 0
-                        print("Graph Channel Index:", channelIndex)
-                    if is_pressed('6') and channelIndex < num_layers - 1 and timer > 4:
-                        channelIndex += 1
-                        timer = 0
-                        print("Graph Channel Index:", channelIndex)
+                # Handle channel index changes
+                if is_pressed('4') and channelIndex > 0 and timer > 4:
+                    channelIndex -= 1
+                    timer = 0
+                    print("Graph Channel Index:", channelIndex)
+                if is_pressed('6') and channelIndex < num_layers - 1 and timer > 4:
+                    channelIndex += 1
+                    timer = 0
+                    print("Graph Channel Index:", channelIndex)
 
-                    # Normalize layers to 0-255
-                    layers = cv2.normalize(layers, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                # Normalize layers to 0-255
+                layers = cv2.normalize(layers, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
-                    # Overlay dimensions
-                    max_overlay_height = overlay.shape[0] - 205  # Space from y=205 to bottom
-                    max_overlay_width = overlay.shape[1]
+                # Overlay dimensions
+                max_overlay_height = overlay.shape[0] - 205  # Space from y=205 to bottom
+                max_overlay_width = overlay.shape[1]
 
-                    # Scale factor and base dimensions
-                    scale_factor = 6
-                    base_height = height * scale_factor
-                    base_width = width * scale_factor
+                # Scale factor and base dimensions
+                scale_factor = 6
+                base_height = height * scale_factor
+                base_width = width * scale_factor
 
-                    # Adjust scale to fit half the available height (for stacking)
-                    if base_height > max_overlay_height // 2:
-                        scale_adjust = (max_overlay_height // 2) / base_height
-                        base_height = int(base_height * scale_adjust)
-                        base_width = int(base_width * scale_adjust)
+                # Adjust scale to fit half the available height (for stacking)
+                if base_height > max_overlay_height // 2:
+                    scale_adjust = (max_overlay_height // 2) / base_height
+                    base_height = int(base_height * scale_adjust)
+                    base_width = int(base_width * scale_adjust)
 
-                    # Calculate offsets and total canvas size
-                    y_offset = min(5, (max_overlay_height - base_height) // max(1, num_layers - 1))
+                # Calculate offsets and total canvas size
+                y_offset = min(5, (max_overlay_height - base_height) // max(1, num_layers - 1))
+                total_layer_height = base_height + (num_layers - 1) * y_offset
+                if total_layer_height > max_overlay_height:
+                    # Recalculate base_height to fit all layers
+                    scale_adjust = max_overlay_height / total_layer_height
+                    base_height = int(base_height * scale_adjust)
+                    base_width = int(base_width * scale_adjust)
+                    y_offset = int(y_offset * scale_adjust)
                     total_layer_height = base_height + (num_layers - 1) * y_offset
-                    if total_layer_height > max_overlay_height:
-                        # Recalculate base_height to fit all layers
-                        scale_adjust = max_overlay_height / total_layer_height
-                        base_height = int(base_height * scale_adjust)
-                        base_width = int(base_width * scale_adjust)
-                        y_offset = int(y_offset * scale_adjust)
-                        total_layer_height = base_height + (num_layers - 1) * y_offset
 
-                    total_layer_width = base_width * num_layers
-                    if total_layer_width <= max_overlay_width:
-                        x_offset = (max_overlay_width - total_layer_width) // max(1, num_layers - 1)
-                    else:
-                        x_offset = (max_overlay_width - base_width) // max(1, num_layers - 1)
+                total_layer_width = base_width * num_layers
+                if total_layer_width <= max_overlay_width:
+                    x_offset = (max_overlay_width - total_layer_width) // max(1, num_layers - 1)
+                else:
+                    x_offset = (max_overlay_width - base_width) // max(1, num_layers - 1)
 
-                    # Canvas dimensions
-                    canvas_height = min(total_layer_height, max_overlay_height)
-                    canvas_width = min(max_overlay_width, base_width + (num_layers - 1) * x_offset)
-                    canvas = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)  # RGBA
+                # Canvas dimensions
+                canvas_height = min(total_layer_height, max_overlay_height)
+                canvas_width = min(max_overlay_width, base_width + (num_layers - 1) * x_offset)
+                canvas = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)  # RGBA
 
-                    # Render layers
-                    for i in range(num_layers):
-                        if i != channelIndex:  # Semi-transparent layers
-                            layer = layers[i]
-                            layer_colored = cv2.applyColorMap(layer, cv2.COLORMAP_JET)
-                            layer_resized = cv2.resize(layer_colored, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
-                            layer_rgba = cv2.cvtColor(layer_resized, cv2.COLOR_BGR2BGRA)
-                            layer_rgba[:, :, 3] = 25  # Semi-transparent
-
-                            x_pos = i * x_offset
-                            y_pos = (num_layers - 1 - i) * y_offset
-                            overlay_x = x_pos
-                            overlay_y = 205 + y_pos
-                            y_max = min(overlay_y + base_height, 205 + canvas_height)
-                            x_max = min(overlay_x + base_width, canvas_width)
-
-                            if y_max > overlay_y and x_max > overlay_x:
-                                canvas_roi = canvas[overlay_y-205:y_max-205, overlay_x:x_max]
-                                layer_patch = layer_rgba[:y_max-overlay_y, :x_max-overlay_x]
-                                alpha = layer_patch[:, :, 3] / 255.0
-                                alpha_bg = (1 - alpha)
-                                for c in range(3):
-                                    canvas_roi[:, :, c] = (
-                                        alpha * layer_patch[:, :, c] + alpha_bg * canvas_roi[:, :, c]
-                                    ).astype(np.uint8)
-                                canvas_roi[:, :, 3] = np.maximum(canvas_roi[:, :, 3], layer_patch[:, :, 3])
-
-                    # Render opaque layer last
-                    if channelIndex < num_layers:
-                        layer = layers[channelIndex]
+                # Render layers
+                for i in range(num_layers):
+                    if i != channelIndex:  # Semi-transparent layers
+                        layer = layers[i]
                         layer_colored = cv2.applyColorMap(layer, cv2.COLORMAP_JET)
                         layer_resized = cv2.resize(layer_colored, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
                         layer_rgba = cv2.cvtColor(layer_resized, cv2.COLOR_BGR2BGRA)
-                        layer_rgba[:, :, 3] = 255  # Fully opaque
+                        layer_rgba[:, :, 3] = 25  # Semi-transparent
 
-                        x_pos = channelIndex * x_offset
-                        y_pos = (num_layers - 1 - channelIndex) * y_offset
+                        x_pos = i * x_offset
+                        y_pos = (num_layers - 1 - i) * y_offset
                         overlay_x = x_pos
                         overlay_y = 205 + y_pos
                         y_max = min(overlay_y + base_height, 205 + canvas_height)
@@ -397,9 +370,35 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                                 ).astype(np.uint8)
                             canvas_roi[:, :, 3] = np.maximum(canvas_roi[:, :, 3], layer_patch[:, :, 3])
 
-                    # Convert to BGR and assign to overlay
-                    canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_BGRA2BGR)
-                    overlay[205:205+canvas_height, 0:canvas_width] = canvas_bgr
+                # Render opaque layer last
+                if channelIndex < num_layers:
+                    layer = layers[channelIndex]
+                    layer_colored = cv2.applyColorMap(layer, cv2.COLORMAP_JET)
+                    layer_resized = cv2.resize(layer_colored, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+                    layer_rgba = cv2.cvtColor(layer_resized, cv2.COLOR_BGR2BGRA)
+                    layer_rgba[:, :, 3] = 255  # Fully opaque
+
+                    x_pos = channelIndex * x_offset
+                    y_pos = (num_layers - 1 - channelIndex) * y_offset
+                    overlay_x = x_pos
+                    overlay_y = 205 + y_pos
+                    y_max = min(overlay_y + base_height, 205 + canvas_height)
+                    x_max = min(overlay_x + base_width, canvas_width)
+
+                    if y_max > overlay_y and x_max > overlay_x:
+                        canvas_roi = canvas[overlay_y-205:y_max-205, overlay_x:x_max]
+                        layer_patch = layer_rgba[:y_max-overlay_y, :x_max-overlay_x]
+                        alpha = layer_patch[:, :, 3] / 255.0
+                        alpha_bg = (1 - alpha)
+                        for c in range(3):
+                            canvas_roi[:, :, c] = (
+                                alpha * layer_patch[:, :, c] + alpha_bg * canvas_roi[:, :, c]
+                            ).astype(np.uint8)
+                        canvas_roi[:, :, 3] = np.maximum(canvas_roi[:, :, 3], layer_patch[:, :, 3])
+
+                # Convert to BGR and assign to overlay
+                canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_BGRA2BGR)
+                overlay[205:205+canvas_height, 0:canvas_width] = canvas_bgr
 
             except Exception as e:
                 sleep(.1)
