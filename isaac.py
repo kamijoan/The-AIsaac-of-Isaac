@@ -528,9 +528,9 @@ def run_instance(isaacNumber, initializeData, control_dict, shared_model, modelL
         elif playerData["time_counter"] <= 1 or manualTesting:
             for k in actionStates:
                 actionStates[k] = 0
-            msg = " ".join(f"{k} {v}" for k, v in actionStates.items())
+            actMsg = " ".join(f"{k} {v}" for k, v in actionStates.items())
             with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
-                f.write(msg)
+                f.write(actMsg)
             reset = done = False
 
             # Initialize run
@@ -568,9 +568,9 @@ def run_instance(isaacNumber, initializeData, control_dict, shared_model, modelL
 
             while not done and not resetEpisode:
 
-                while step_count != 0:
+                while True:
                     with open(f"F:/IsaacResponse{isaacNumber}.txt", "r") as f:
-                        if msg == f.read().strip():
+                        if actMsg == f.read().strip():
                             break  # Loop until msg is confirmed back
 
                 step_count += 1
@@ -603,6 +603,7 @@ def run_instance(isaacNumber, initializeData, control_dict, shared_model, modelL
                 with open(f"F:/IsaacTileData{isaacNumber}.txt", "r") as f:
                     first_line = f.readline()
                     tile_data = f.readlines()
+                    #print(first_line)
                 room, roomX, roomY = map(int, first_line.split(","))
                 roomGrid = np.array([list(map(int, line.strip().split(","))) for line in tile_data], dtype=np.int32)
                 roomGrid = roomGrid.reshape((roomY, roomX, 3))
@@ -749,14 +750,14 @@ def run_instance(isaacNumber, initializeData, control_dict, shared_model, modelL
                                 for shoot_action in shooting_actions:
                                     actionStates[shoot_action] = 0
                             actionStates[execute] = 1
-                            msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + f" {step_count}"
+                            actMsg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + f" {step_count}"
                         if execute == action_size:
-                            msg = f"{step_count}"
+                            actMsg = f"{step_count}"
                     else:
-                        msg = f"target_position:{execute[0]},{execute[1]} {step_count}"
+                        actMsg = f"target_position:{execute[0]},{execute[1]} {step_count}"
 
                     with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
-                        f.write(msg)
+                        f.write(actMsg)
 
                     keyboardKeys = list(actionStates.values())
                     ######################################Rewards##########################################
