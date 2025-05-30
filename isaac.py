@@ -4,40 +4,15 @@ from threading import Thread
 from scipy.ndimage import label
 from os import path,listdir,remove
 import numpy as np
-import cv2
+import cv2, torch
+import torch.nn.functional as F
 import torch.multiprocessing as mp
 
 #torch.set_printoptions(profile="full")
 
 from isaacPPO import PPOPolicy, PPOAgent
 
-def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy, rollout_queue):
-
-    def execute_action(action, actionStates, actionCounter, isaacNumber):
-        actionCounter += 1
-        if isinstance(action, int):
-            if action < action_size:
-                if action in opposite_actions:
-                    opposite = opposite_actions[action]
-                    actionStates[opposite] = 0
-                elif action in shooting_actions:
-                    for shoot_action in shooting_actions:
-                        actionStates[shoot_action] = 0
-                actionStates[action] = 1
-                msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + f" {actionCounter}"
-            if action == action_size:
-                msg = f"{actionCounter}"
-        else:
-            msg = f"target_position:{action[0]},{action[1]} {actionCounter}"
-
-        with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
-            f.write(msg)
-        while True:
-            with open(f"F:/IsaacResponse{isaacNumber}.txt", "r") as f:
-                if msg == f.read().strip():
-                    break  # Loop until msg is confirmed back
-
-        return list(actionStates.values()),actionStates, actionCounter  # Return full state list
+def run_instance(isaacNumber, initializeData, control_dict, shared_model, modelLock, agentCopy, rollout_queue):
 
     def readGameData(isaacNumber, playerData):
         with open(f"F:/IsaacData{isaacNumber}.txt", "r") as f:
@@ -210,7 +185,7 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                             y = (y + 3) * 40
                             cv2.circle(overlay, (int(x / 10), int(y / 10)), 1, (255, 0, 0), -1)
 
-                randomness = (agent.entropy / np.log(action_size)) * 100
+                randomness = (entropy / np.log(action_size)) * 100
                 randomness = min(max(randomness, 0), 100)
 
                 reward_color = (0, 255, 0) if reward >= 0 else (0, 0, 255)
@@ -219,10 +194,9 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                 (text_width, _), _ = cv2.getTextSize(f"Total Reward: {total_reward:.2f}, Reward:", cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1)
                 cv2.putText(overlay, f"{reward:+.3f}", (2 + text_width, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.3, reward_color, 1)
                 #cv2.putText(overlay, f"Reset in {resetTimer + 1 - step_count} | Randomness: {randomness:.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                cv2.putText(overlay, f"Reset in {agent.n_steps+1 - len(agent.states)} | Confidence: {(100-randomness):.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                cv2.putText(overlay, f"Reset in {agent.n_steps+1 - len(states)} | Confidence: {(100-randomness):.2f}%", (2, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
                 cv2.putText(overlay, f"Episode: {agent.episode_counter}", (2, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
-                graphProbs = agent.probs
                 if pathfinding:
                     cv2.circle(overlay, (int(agent_target_x / 10), int(agent_target_y / 10)), 2, (2, 2, 255), 0)
                     prob_grid = np.array(graphProbs).reshape(16, 28)  # Your 16x28 grid
@@ -265,7 +239,7 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                             cv2.putText(overlay, letter, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
                 #learn() progress bar
-                cv2.rectangle(overlay, (0,190),(int((len(agent.states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
+                cv2.rectangle(overlay, (0,190),(int((len(states) / agent.n_steps) * overlay.shape[1]),200), (200,200,200), -1)
                 cv2.rectangle(overlay, (0,190),(int((agent.progress / 100) * overlay.shape[1]),200), (50,200,50), -1)
 
                 if is_pressed('7') and agent.policy.visualDataIndex > 0 and timer > 10:
@@ -401,58 +375,20 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                 overlay[205:205+canvas_height, 0:canvas_width] = canvas_bgr
 
             except Exception as e:
-                sleep(.1)
+                sleep(1)
                 print("overlay:",e)
 
             cv2.imshow(f"Overlay{isaacNumber}", overlay)
             cv2.waitKey(1)
 
-    playerNormalization = {
-        "x": 1200,
-        "y": 1200,
-        "vxneg": 30,
-        "vx": 30,
-        "vyneg": 30,
-        "vy": 30,
-        "hp": 24,  # Max red hearts
-        "max_hp": 24,
-        "soul_hp": 24,
-        "black_hp": 24,
-        "rotten_hp": 24,
-        "bone_hp": 6,
-        "eternal_hp": 2,
-        "extra_lives": 10,  # Based on Dead Cat, Lazarus, etc.
-        "coins": 100,
-        "bombs": 100,
-        "keys": 100,
-        "golden_bomb": 1,
-        "golden_key": 1,
-        "active1": 800,  # Max item ID in Repentance
-        "charge1": 100,  # Most active items max out at 12 charge
-        "full_charge1": 1,
-        "active2": 800,
-        "charge2": 100,
-        "full_charge2": 1,
-        "trinket1": 200,  # Max trinket ID
-        "trinket2": 200,
-        "damage": 100,  # Extremely high damage (Soy Milk is 0.5, Brimstone is ~10)
-        "fire_rate": 100,  # Higher = slower (default 10, Soy Milk ~2)
-        "shot_speed": 2,
-        "range": 500,
-        "luck": 10,
-        "speed": 2,
-        "card": 100,  # Max card ID
-        "pill": 13,  # Max pill ID
-        "alive_enemies": 100,
-        "room_type": 30,
-        "first_visit": 1,
-        "stage": 20
-    }
-    action_size = 8
-    pathfinding = True if action_size > 100 else False
-    useHeatmaps = 0 #0 or 10, maybe 1 for only player
-    roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
-    stateX,stateY = 28, 16
+    def loadSharedModel():
+        with modelLock:
+            state_dict = dict(shared_model)
+            state_dict = {key: value.to(agent.device) for key, value in state_dict.items()}
+            agent.policy.load_state_dict(state_dict)
+            #print(f"Isaac {isaacNumber}: Updated Model.")
+
+    playerNormalization,action_size,pathfinding,useHeatmaps,roomChannels,stateX,stateY = initializeData
 
     entitiesNormalization = np.array([
         10,        # 0: Category
@@ -548,30 +484,33 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
 
     agent = agentCopy
     agent.isaacNumber = isaacNumber
-
-    emptyFloorTensor = np.zeros((6,13,13), dtype=np.float32)
-    emptyAdditionalValues =  np.zeros((num_additional_values), dtype=np.float32)
-    emptyFinalState = np.zeros((roomChannels,stateY,stateX),  dtype=np.float32)
+    loadSharedModel()
 
     roomX,roomY = 15, 9
     overlay_thread = Thread(target=drawOverlay, daemon=True)
     overlay_thread.start()
 
-    manualLearning = False
     manualTesting = False
-
-    agent.states.append((emptyFinalState, emptyFloorTensor, emptyAdditionalValues))
 
     #effect ids, still in progress, removed ones don't reach the state, allowed ones just don't get printed.
     removedEffects = np.array([2,3,4,5,7,11,12,13,14,15,16,17,20,21,27,33,38,43,58,59,63,64,65,66,68,79,80,86,99,133,146], dtype=float)
     allowedEffects = np.array([1,6,22,23,24,25,26,30,34,44,45,46,50,57,61,62], dtype=float)
+
+    # Initialize rollout storage
+    states = []
+    actions = []
+    rewards = []
+    dones = []
+    log_probs_list = []
+    values_list = []
+    hidden_states = []
 
     print(f"Running Isaac {isaacNumber}...")
 
     with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
         f.write("")
 
-    freedom = False
+    freedom = True
 
     episodeSteps = 0
 
@@ -599,13 +538,10 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
             previousX = playerData["x"]
             previousY = playerData["y"]
             currentFloor = playerData["stage"]
-            floorGrid_tensor = emptyFloorTensor
-            additional_values_tensor = emptyAdditionalValues
-            final_state = emptyFinalState
 
             itemsSum = len(playerData["items"])
             previousPickups = pickups = playerData["bombs"] + playerData["coins"] + playerData["keys"]
-            actionCounter = step_count = enemyDamage = lastEnemyDamage = punishX = punishY = total_reward = previousItemsSum = totalEnemyHP = previousEnemyHP = enemyDamage = 0
+            step_count = enemyDamage = lastEnemyDamage = punishX = punishY = total_reward = previousItemsSum = totalEnemyHP = previousEnemyHP = enemyDamage = 0
             roomHP = previousHP = totalHP
             visited_rooms = last_visited_rooms = 1
             lastRoom = 84
@@ -626,37 +562,19 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
             hidden_state = None
             resetEpisode = False
 
-            with learn_lock:
-                if shared_model:
-                    state_dict = dict(shared_model)
-                    if agent.device.type == "cuda":
-                        state_dict = {key: value.to(agent.device) for key, value in state_dict.items()}
-                    agent.policy.load_state_dict(state_dict)
-
             sleep(1)
 
             stepsInRoom = 0
 
             while not done and not resetEpisode:
 
+                while step_count != 0:
+                    with open(f"F:/IsaacResponse{isaacNumber}.txt", "r") as f:
+                        if msg == f.read().strip():
+                            break  # Loop until msg is confirmed back
+
                 step_count += 1
                 stepsInRoom += 1
-
-                action = agent.act(final_state, floorGrid_tensor, additional_values_tensor)
-
-                if not manualTesting and not manualLearning:
-                    if pathfinding:
-                        agent_target_x = 40.0 + (action % 28) * 40
-                        agent_target_y = 120.0 + (action // 28) * 40
-                        keyboardKeys, actionStates, actionCounter = execute_action((agent_target_x, agent_target_y), actionStates, actionCounter, isaacNumber)
-                    else:
-                        keyboardKeys, actionStates, actionCounter = execute_action(action, actionStates, actionCounter, isaacNumber)
-                elif manualTesting:
-                    keyboardKeys, actionStates, actionCounter = execute_action(action_size, actionStates, actionCounter, isaacNumber)
-                """elif manualLearning:
-                    action = deduce_action()
-                    update_actionStates()
-                    keyboardKeys = list(actionStates.values())"""
 
                 visited_rooms = 0
                 floorGrid = np.zeros((13, 13, 6), dtype=np.float32)
@@ -797,11 +715,51 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                     additional_values = np.concatenate([np.array(keyboardKeys, dtype=np.float32), dataValues, itemArray, entitiesListFull.flatten()])
 
                     # 0 and 1 are x y coordinates, 2 to 4 are the tile id, collision and state. 5 is player heatmap. 6 to 14 are entities. Enemy,bomb,pickup,enemy proj,ally tear,familiar,laser,effect,slot+beggar.
-                    final_state = roomGridSectionF
-                    floorGrid_tensor = floorGrid_resized
-                    additional_values_tensor = additional_values
+                    stateNumpy = roomGridSectionF
+                    floorGridNumpy = floorGrid_resized
+                    additionalValuesNumpy = additional_values
 
-                    #Rewards
+                    with torch.no_grad():
+                        logits, value, hidden_state = agent.policy(stateNumpy, floorGridNumpy, additionalValuesNumpy, hidden_state)
+                        probs = F.softmax(logits, dim=-1)
+                        action = torch.multinomial(probs, 1).item()
+                        log_prob = probs.log().gather(1, torch.tensor([[action]], device=agent.device))
+                        entropy = -torch.sum(probs * torch.log(probs + 1e-6))
+                        min_prob = probs.min()
+                        max_prob = probs.max()
+                        probs = ((probs - min_prob) / (max_prob - min_prob + 1e-6)) * 100
+                        graphProbs = probs.squeeze().tolist()
+
+                    if not manualTesting:
+                        if pathfinding:
+                            agent_target_x = 40.0 + (action % 28) * 40
+                            agent_target_y = 120.0 + (action // 28) * 40
+                            execute = (agent_target_x, agent_target_y)
+                        else:
+                            execute = action
+                    else:
+                        execute = action_size
+
+                    if isinstance(execute, int):
+                        if execute < action_size:
+                            if execute in opposite_actions:
+                                opposite = opposite_actions[execute]
+                                actionStates[opposite] = 0
+                            elif execute in shooting_actions:
+                                for shoot_action in shooting_actions:
+                                    actionStates[shoot_action] = 0
+                            actionStates[execute] = 1
+                            msg = " ".join(f"{k} {v}" for k, v in actionStates.items()) + f" {step_count}"
+                        if execute == action_size:
+                            msg = f"{step_count}"
+                    else:
+                        msg = f"target_position:{execute[0]},{execute[1]} {step_count}"
+
+                    with open(f"F:/IsaacInputs{isaacNumber}.txt", "w") as f:
+                        f.write(msg)
+
+                    keyboardKeys = list(actionStates.values())
+                    ######################################Rewards##########################################
                     with open(f"F:/IsaacEnemyDamage{isaacNumber}.txt", "r") as f:
                         currentEnemyDamage = float(f.read())
 
@@ -871,10 +829,8 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
 
                     targets = []
 
-
-                    if playerData["extra_lives"] != 0:
+                    if playerData["extra_lives"] != 0:#-------------------------------
                         print("lives:",playerData["extra_lives"])
-
 
 
                     if pathfinding:
@@ -969,8 +925,13 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                         total_reward = 0
                         episodeSteps += step_count
 
-                    agent.rewards.append(reward)
-                    agent.dones.append(done)
+                    states.append((stateNumpy, floorGridNumpy, additionalValuesNumpy))
+                    actions.append(action)
+                    log_probs_list.append(log_prob.item())
+                    values_list.append(value.item())
+                    hidden_states.append((hidden_state[0].cpu(), hidden_state[1].cpu()))
+                    rewards.append(reward)
+                    dones.append(done)
                 else:
                     if playerData["time_counter"] <= 1:
                         done = True
@@ -981,10 +942,23 @@ def run_instance(isaacNumber, control_dict, shared_model, learn_lock, agentCopy,
                 previousHP, previousItemsSum, previousEnemyHP, lastEnemyDamage = totalHP, itemsSum, totalEnemyHP, currentEnemyDamage
 
                 #if done and len(states) > (agent.n_steps - resetTimer):
-                if done or len(agent.states) > agent.n_steps:
-                    agent.sendRollouts(done)
-                    total_reward = 0.0
-                    episodeSteps = 0
+                if done or len(states) > agent.n_steps:
+                    if len(states) == agent.n_steps+2:
+                        episodeSteps = 1
+                        if sum(rewards[:-1]) != 0:
+                            rollout_queue.put((states, actions[:-1], rewards[:-1], dones[:-1], log_probs_list[:-1], values_list[:-1], hidden_states[:-1]))
+                            agent.episode_counter += 1
+                            print(f"Isaac {isaacNumber}: Sent rollout, Episode completed.")
+                        states = [states[-1]]
+                        actions = [actions[-1]]
+                        rewards = [rewards[-1]]
+                        dones = [dones[-1]]
+                        log_probs_list = [log_probs_list[-1]]
+                        values_list = [values_list[-1]]
+                        hidden_states = [hidden_states[-1]]
+                    else:
+                        loadSharedModel()
+                        episodeSteps = 0
 
 if __name__ == "__main__":
     mp.set_start_method('spawn')  # Required for CUDA in multiprocessing
@@ -992,7 +966,7 @@ if __name__ == "__main__":
     control_dict = manager.dict()  # Controls whether instances should run
     shared_model = manager.dict()
     processes = {}  # Store running processes
-    learn_lock = mp.Lock()
+    modelLock = mp.Lock()
     rollout_queue = mp.Queue()
 
     playerNormalization = {
@@ -1042,6 +1016,8 @@ if __name__ == "__main__":
     roomChannels = 6+useHeatmaps if pathfinding else 5+useHeatmaps
     stateX,stateY = 28, 16
 
+    initializeData = (playerNormalization,action_size,pathfinding,useHeatmaps,roomChannels,stateX,stateY)
+
     learnerAgent = PPOAgent(
         room_shape=(roomChannels, stateY, stateX),
         map_shape=(6, 13, 13),action_size=action_size,
@@ -1050,7 +1026,7 @@ if __name__ == "__main__":
         n_entity_memory=200*13,
         isaacNumber=0,
         shared_model=shared_model,
-        learn_lock=learn_lock,
+        modelLock=modelLock,
         rollout_queue=rollout_queue)
 
     # Load the best model and initialize shared_model with CPU tensors
@@ -1060,8 +1036,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"No model found: {e}")
 
-    with learn_lock:
-        # Ensure CPU tensors
+    with modelLock:
         cpu_state_dict = {key: value.cpu() for key, value in learnerAgent.policy.state_dict().items()}
         shared_model.clear()
         shared_model.update(cpu_state_dict)
@@ -1085,7 +1060,7 @@ if __name__ == "__main__":
                             control_dict[f"isaac_{isaacNumber}"] = True
                             p = mp.Process(
                                 target=run_instance,
-                                args=(isaacNumber, control_dict, shared_model, learn_lock, learnerAgent, rollout_queue)
+                                args=(isaacNumber, initializeData, control_dict, shared_model, modelLock, learnerAgent, rollout_queue)
                             )
                             p.start()
                             processes[f"isaac_{isaacNumber}"] = p
