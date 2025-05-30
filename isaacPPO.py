@@ -188,7 +188,7 @@ class PPOPolicy(nn.Module):
                 self.visualData[index] = data_padded.view(batch_size, channels, viewY, viewX)
 
 class PPOAgent:
-    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, shared_model, learn_lock, rollout_queue):
+    def __init__(self, room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber, shared_model, modelLock, rollout_queue):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = PPOPolicy(room_shape, map_shape, action_size, n_critical, n_items, n_entity_memory, isaacNumber).to(self.device)
 
@@ -197,6 +197,7 @@ class PPOAgent:
             {'params': [p for n, p in self.policy.named_parameters() if 'critic' not in n], 'lr': lr},
             {'params': [p for n, p in self.policy.named_parameters() if 'critic' in n], 'lr': lr}
         ])
+
         self.gamma = 0.99
         self.clip_param = 0.2
         self.value_loss_coef = 0.5
@@ -205,75 +206,27 @@ class PPOAgent:
         self.n_steps = 2048
         self.data_chunk = 256
 
-        self.step_counter = 0
         self.episode_counter = 0
         self.progress = 0
         self.entropy = None
         self.probs = None
 
         self.shared_model = shared_model
-        self.learn_lock = learn_lock
+        self.modelLock = modelLock
         self.action_size = action_size
         self.isaacNumber = isaacNumber
         self.rollout_queue = rollout_queue
-
-        # Initialize rollout storage
-        self.states = []
-        self.actions = []
-        self.rewards = []
-        self.dones = []
-        self.log_probs_list = []
-        self.values_list = []
-        self.hidden_states = []
-        self.current_hidden_state = None
-
-    def act(self, room_grid, map_grid, additional_values):
-        # Pass raw NumPy arrays to forward()
-        with torch.no_grad():
-            logits, value, hidden_state = self.policy(room_grid, map_grid, additional_values, self.current_hidden_state)
-            probs = F.softmax(logits, dim=-1)
-            action = torch.multinomial(probs, 1).item()
-            log_prob = probs.log().gather(1, torch.tensor([[action]], device=self.device))
-            self.entropy = -torch.sum(probs * torch.log(probs + 1e-6))
-            min_prob = probs.min()
-            max_prob = probs.max()
-            graphProbs = ((probs - min_prob) / (max_prob - min_prob + 1e-6)) * 100
-            self.probs = graphProbs.squeeze().tolist()
-        # Store the new hidden state (move to CPU to avoid pickling issues)
-        self.current_hidden_state = (hidden_state[0], hidden_state[1])
-        # Store rollout data as raw NumPy arrays or CPU tensors
-        self.states.append((room_grid, map_grid, additional_values))  # Store raw NumPy arrays
-        self.actions.append(action)
-        self.log_probs_list.append(log_prob.item())
-        self.values_list.append(value.item())
-        self.hidden_states.append((hidden_state[0].cpu(), hidden_state[1].cpu()))
-
-        return action
-
-    def sendRollouts(self, done):
-        if len(self.states) > self.n_steps:
-            if sum(self.rewards) != 0:
-                self.rollout_queue.put((self.states, self.actions, self.rewards, self.dones, self.log_probs_list, self.values_list, self.hidden_states))
-                print(f"Isaac {self.isaacNumber}: Sent rollout, Episode completed")
-            self.states = [self.states[-1]]
-            self.actions = []
-            self.rewards = []
-            self.dones = []
-            self.log_probs_list = []
-            self.values_list = []
-            self.hidden_states = []
-            self.current_hidden_state = None if done else self.current_hidden_state
 
     def run(self):
         while True:
             try:
                 rollouts = self.rollout_queue.get(timeout=1.0)
-                if len(rollouts) > 1:
+                if len(rollouts[1]) > 2:
                     print("Learn: Grabbed a rollout...")
                     self.learn(rollouts)
             except Exception as e:
                 #print(e)
-                pass  # Queue empty, continue polling
+                pass
 
     def _process_state_batch(self, states, hidden):
         # Convert NumPy arrays to tensors and stack them
@@ -288,7 +241,7 @@ class PPOAgent:
         hidden_stacked = (h_stacked, c_stacked)
         return room_grids, map_grids, adds, hidden_stacked
 
-    def learn(self, rollouts, n_epochs=8,):
+    def learn(self, rollouts, n_epochs=8):
         states, actions, rewards, dones, old_log_probs, values, hidden_states = rollouts
 
         # Convert lists to tensors where needed (rewards and dones are likely Python lists or NumPy arrays)
@@ -384,17 +337,16 @@ class PPOAgent:
         total_loss /= total_batches
 
         self.entropy = total_entropy
-        self.step_counter += len(states)
         self.episode_counter += 1
         self.progress = 0
 
-        with self.learn_lock:
+        with self.modelLock:
             cpu_state_dict = {key: value.cpu() for key, value in self.policy.state_dict().items()}
             self.shared_model.clear()
             self.shared_model.update(cpu_state_dict)
 
         print("Episode:", self.episode_counter)
-        if self.episode_counter % 5 == 0:
+        if self.episode_counter % 4 == 0:
             self.save("F:/isaacPPOModel.pth")
 
         print(f"=== Isaac {self.isaacNumber} Gradient Summary (Averaged) ===")
@@ -404,7 +356,7 @@ class PPOAgent:
             print(f"{self.isaacNumber}. {name}: mean={mean:.6f}, std={std:.6f}")
 
         print(f"--- Isaac {self.isaacNumber} Learn Summary ---")
-        print(f"{self.isaacNumber}. Step: {self.step_counter}")
+        print(f"{self.isaacNumber}. Episode: {self.episode_counter}")
         print(f"{self.isaacNumber}. Policy Loss: {total_policy_loss:.4f} | Should be negative.")
         print(f"{self.isaacNumber}. Value Loss: {total_value_loss:.4f} | Should be small and positive, critic output.")
         print(f"{self.isaacNumber}. Total Loss: {total_loss:.4f} | Should be small and negative. Policy loss+Value loss * stuff.")
@@ -413,21 +365,19 @@ class PPOAgent:
         print("\n")
 
     def save(self, path):
-        with self.learn_lock:
+        with self.modelLock:
             cpu_state_dict = {key: value.cpu() for key, value in self.policy.state_dict().items()}
             torch.save({
                 'policy_state_dict': cpu_state_dict,
                 'optimizer_state_dict': self.optimizer.state_dict(),
-                'step_counter': self.step_counter,
                 'episode_counter': self.episode_counter
             }, path)
             print(f"{self.isaacNumber}. Model saved to {path}")
 
     def load(self, path):
         checkpoint = torch.load(path, map_location=self.device)
-        with self.learn_lock:
+        with self.modelLock:
             self.policy.load_state_dict(checkpoint['policy_state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.step_counter = checkpoint['step_counter']
             self.episode_counter = checkpoint['episode_counter']
             print(f"{self.isaacNumber}. Model loaded from {path}")
